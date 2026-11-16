@@ -550,11 +550,16 @@ class ChatEngine:
         text = (query or "").strip()
         if not text or len(text) > 40:
             return ""
-        pattern = (
-            "工具|tool|技能|skill|能力|能做什么|会什么|能干什么"
-            "|子\\s*agent|subagent"
-        )
-        if not _re.search(pattern, text, _re.I):
+        # 只认“关于你自己”的问题：必须出现第二人称 + 能力词。
+        # 否则像「差旅制度里的报销流程有哪些」这种真问题会被误截成能力清单。
+        if not _re.search(r"你|您", text):
+            return ""
+        if not _re.search(
+            r"(工具|能力|技能|skill|tool|能做什么|会什么|能干什么|支持什么|子\s*agent|subagent)",
+            text,
+            _re.I,
+        ):
+            return ""
             return ""
         spec = self.settings.agent_spec
         tools = [str(item) for item in (spec.tools or [])]

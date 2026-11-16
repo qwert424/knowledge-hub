@@ -787,3 +787,18 @@ async def test_prefetch_kept_for_lookup_questions(settings: Settings) -> None:
     assert retriever.retrievals >= 1
     assert agent.requests and agent.requests[0].initial_context
     assert "token" in [kind for kind, _ in events]
+
+
+def test_capability_answer_does_not_hijack_fact_questions(settings) -> None:
+    """只有“关于你自己”的问题才走能力清单，业务问题不能被截胡。"""
+    from knowledge_hub.engine.chat import ChatEngine
+
+    engine = ChatEngine.__new__(ChatEngine)
+    engine.settings = settings
+
+    if settings.agent_spec.tools:
+        assert engine._capability_answer("你有那些工具可以使用？") != ""
+        assert engine._capability_answer("你能做什么") != ""
+    # 业务问题：即使带“能力/工具”字样也不能拦截
+    assert engine._capability_answer("差旅制度里的报销流程有哪些？") == ""
+    assert engine._capability_answer("工迷通 3.0 连接器支持哪些能力？") == ""
