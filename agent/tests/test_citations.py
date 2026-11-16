@@ -89,3 +89,42 @@ def test_snippet_match_near_end_keeps_leading_ellipsis_only() -> None:
 def test_snippet_whitespace_is_normalised() -> None:
     text = "第一行\n\n第二行    第三行"
     assert trim_snippet(text) == "第一行 第二行 第三行"
+
+def test_citation_marker_rewrites_book_title_reference() -> None:
+    """模型写的 [《文档名》] 必须变成 [cN]，否则前端来源面板挂不上。"""
+    from knowledge_hub.rag.citations import rewrite_citation_markers
+
+    titles = ["A400 推理一体机产品与配置说明", "差旅报销管理办法"]
+    text = "内存 512 GB[《A400 推理一体机产品与配置说明》]，住宿上限 600 元[《差旅报销管理办法》](http://x/y)。"
+    out = rewrite_citation_markers(text, titles)
+    assert "[c1]" in out
+    assert "[c2]" in out
+    assert "《" not in out
+
+
+def test_citation_marker_keeps_unknown_bracket_text() -> None:
+    from knowledge_hub.rag.citations import rewrite_citation_markers
+
+    text = "见[《不存在的文档》]。"
+    assert rewrite_citation_markers(text, ["A400 推理一体机产品与配置说明"]) == text
+
+
+def test_citation_marker_collapses_double_wrapped_image() -> None:
+    """[![图](url)](url) 要还原成单个图片，渲染器才不会套一层链接。"""
+    from knowledge_hub.rag.citations import rewrite_citation_markers
+
+    url = "http://127.0.0.1:9002/knowledge-hub/a400.png?sign=1"
+    text = f"[![]({url})]({url})"
+    out = rewrite_citation_markers(text, [])
+    assert out == f"![]({url})"
+
+
+def test_citation_marker_streaming_holds_partial_bracket() -> None:
+    """流式输出时，被切断的 [《… 不能先发出去再补救。"""
+    from knowledge_hub.rag.citations import CitationMarker
+
+    marker = CitationMarker(["A400 推理一体机产品与配置说明"])
+    assert marker.feed("内存 512 GB[") == "内存 512 GB"
+    assert marker.feed("《A400 推理一") == ""
+    assert marker.feed("体机产品与配置说明》]") == "[c1]"
+    assert marker.flush() == ""

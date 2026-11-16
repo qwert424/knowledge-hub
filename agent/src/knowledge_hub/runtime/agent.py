@@ -29,7 +29,9 @@ from typing import Any
 
 from knowledge_hub.config.agent_spec import AgentSpec
 from knowledge_hub.config.settings import Settings
+from knowledge_hub.engine.ask_options import as_options
 from knowledge_hub.engine.prompts import capability_block, compose_system_prompt
+from knowledge_hub.rag.citations import rewrite_citation_markers
 from knowledge_hub.runtime.middleware import Planner, Reviewer, SecurityGuard
 from knowledge_hub.runtime.sandbox import SandboxClient
 from knowledge_hub.runtime.tools import (
@@ -147,6 +149,9 @@ class AgentRuntime:
         if self.deps.skills is not None and skills:
             system_prompt = f"{system_prompt}\n\n{self.deps.skills.prompt_section(skills)}"
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        # 合法图片地址：只允许来自预取切片的 image_url 或 get_bucket_file_url 的返回值。
+        # 模型自己拼的图片链接要在输出前剔除（否则用户会看到 404/错图）。
+        allowed_images: set[str] = _collect_image_urls(request.initial_context)
         for turn in _history(request.history):
             messages.append(turn)
         user_content = request.query.strip()
@@ -265,7 +270,11 @@ class AgentRuntime:
                     )
                     continue
                 async for event in self._finalize(
-                    request, content=_strip_inline_task(content), evidence=evidence, usage=usage
+                    request,
+                    content=_strip_inline_task(content),
+                    evidence=evidence,
+                    usage=usage,
+                    allowed_images=allowed_images,
                 ):
                     yield event
                 return
@@ -283,6 +292,8 @@ class AgentRuntime:
                 yield "tool", {"name": name, "arguments": preview}
                 try:
                     result = await self._run_tool(toolset, name, arguments, ctx)
+                    if name == "get_bucket_file_url":
+                        allowed_images.update(_urls_in(result))
                 except AskUser as ask:
                     payload = await self._ask_payload(messages, ask)
                     yield "status", payload
@@ -303,7 +314,11 @@ class AgentRuntime:
         yield "status", {"stage": "step_budget_exhausted", "steps": usage["steps"]}
         summary = await self._summarise(messages)
         async for event in self._finalize(
-            request, content=summary, evidence=evidence, usage=usage
+            request,
+            content=summary,
+            evidence=evidence,
+            usage=usage,
+            allowed_images=allowed_images,
         ):
             yield event
 
@@ -323,6 +338,8 @@ class AgentRuntime:
             question = _last_assistant_text(messages) or "请补充更多信息。"
         if len(options) < 2:
             options = await self._infer_options(question) or options
+        # 还不足两个就上确定性兜底：反问必须能点，不能只剩“请自己在下面补充”
+        options = as_options(options, question)
         logger.debug("awaiting_user question=%r options=%s", question[:60], options)
         return {"stage": "awaiting_user", "question": question, "options": options}
 
@@ -373,6 +390,7 @@ class AgentRuntime:
         content: str,
         evidence: Sequence[str],
         usage: dict[str, Any],
+        allowed_images: set[str] | None = None,
     ) -> AsyncIterator[Event]:
         """复核 + 安全扫描后再把答案交给用户（最多改写一次）。"""
         text = content
@@ -418,6 +436,12 @@ class AgentRuntime:
                 yield "status", {"stage": "security", "blocked": False}
 
         visible = _strip_inline_task(text or "").strip()
+        visible = _sanitize_images(visible, allowed_images or set())
+        titles = [
+            str(item.get("doc_title") or item.get("title") or "")
+            for item in (request.initial_context or [])
+        ]
+        visible = rewrite_citation_markers(visible, titles)
         if visible:
             yield "token", {"text": visible}
         yield "done", {"usage": usage}
@@ -752,16 +776,10 @@ def _initial_context_prompt(chunks: Sequence[Mapping[str, Any]], limit: int = 6)
     """
     shown = list(chunks)[:limit]
 
-    def _link_of(item: Mapping[str, Any]) -> str:
-        payload = item.get("metadata") or item
-        return str(payload.get("url") or item.get("source_url") or "").strip()
-
-    has_link = any(_link_of(item) for item in shown)
     citation_rule = (
-        "2. 每个来自材料的结论后面标注来源：用 [《文档标题》](材料里给出的链接) 的 Markdown 链接形式。"
-        if has_link
-        else "2. 每个来自材料的结论后面标注来源：只写《文档标题》。材料没有提供链接，"
-        "不要写 Markdown 链接语法，也不要写 (链接) / (#) 这类空链接。"
+        "2. 每个来自材料的结论后面标注来源，写成 [cN]：材料 1 写 [c1]、材料 2 写 [c2]，以此类推。"
+        "不要写 [《文档名》]、也不要写成 Markdown 链接形式的引用——前端靠 [cN] 关联来源与原文。"
+        "材料里的图片直连地址要原样嵌进 Markdown 图片语法，不要再套一层链接。"
     )
     lines = [
         f"以下是系统预先检索到的企业知识库片段（共 {len(shown)} 条，按相关度排序）。"
@@ -773,8 +791,11 @@ def _initial_context_prompt(chunks: Sequence[Mapping[str, Any]], limit: int = 6)
         "1.1 确实相关时，材料里写明的金额、时限、条件、例外一律原样采用，"
         "不要用“请参考公司规定”“具体以单位为准”这类话把已知事实含糊掉。",
         citation_rule,
-        "3. 材料不足以回答时，可以直接说明缺什么，或用 task 委派 retrieve_agent 继续检索；"
-        "不要用通用知识补写公司制度、金额或流程。",
+        "3. 材料不足以回答、而问题涉及企业事实（产品参数、制度、金额、流程、图片）时，"
+        "必须先用 task 委派 retrieve_agent 换关键词再检索一次，拿到结果后再作答；"
+        "只有检索也确认没有时，才说明缺什么。不要用通用知识补写公司制度、金额或流程。",
+        "4. 问图片/外观/照片时，只能引用材料里给出的「图片直连地址」；"
+        "没有给地址就如实说没有图，禁止把图注文字、章节名当成图片链接。",
         "",
     ]
     for index, chunk in enumerate(shown, start=1):
@@ -785,6 +806,10 @@ def _initial_context_prompt(chunks: Sequence[Mapping[str, Any]], limit: int = 6)
         kind = str(payload.get("kind") or payload.get("block_type") or "")
         url = str(payload.get("url") or chunk.get("source_url") or "").strip()
         header = f"### 材料 {index}：《{title}》"
+        image_url = str(payload.get("image_url") or "").strip()
+        if image_url.startswith("http"):
+            # 直接给可嵌入的地址，模型就不会拿图注当 URL 了
+            header += "\n图片直连地址（可直接嵌入）：" + image_url
         if section:
             header += f" — {section}"
         if kind and kind not in {"paragraph", "page"}:
@@ -876,6 +901,43 @@ def _parse_option_list(text: str) -> list[str]:
         if len(options) >= 6:
             break
     return options if len(options) >= 2 else []
+
+
+_IMAGE_MD = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+
+
+def _urls_in(text: str) -> set[str]:
+    return set(re.findall(r"https?://[^\s)\]\"'>]+", text or ""))
+
+
+def _collect_image_urls(chunks: Sequence[Mapping[str, Any]]) -> set[str]:
+    """从预取切片里取出合法图片地址。"""
+    urls: set[str] = set()
+    for item in chunks or []:
+        payload = item.get("metadata") or item
+        for key in ("image_url", "imageUrl"):
+            value = str(payload.get(key) or "").strip()
+            if value.startswith("http"):
+                urls.add(value)
+    return urls
+
+
+def _sanitize_images(text: str, allowed: set[str]) -> str:
+    """剔除模型自己拼的图片链接：只保留来自检索/工具的地址。
+
+    不合法的图片语法降级成文字描述，而不是留下一个坏链接。
+    """
+    if not text or "![" not in text:
+        return text
+
+    def _repl(match: re.Match[str]) -> str:
+        alt, url = match.group(1), match.group(2)
+        if url in allowed:
+            return match.group(0)
+        logger.warning("dropped unverified image link: %s", url[:80])
+        return alt.strip() or "（图片链接未通过校验）"
+
+    return _IMAGE_MD.sub(_repl, text)
 
 
 def _render_submission(text: str) -> str:

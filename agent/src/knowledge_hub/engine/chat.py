@@ -17,6 +17,7 @@ from typing import Any
 
 from knowledge_hub.config.settings import Settings
 from knowledge_hub.decision.jev import Jev, JevOption, JevResult
+from knowledge_hub.engine.ask_options import as_options
 from knowledge_hub.engine.history import compress_history
 from knowledge_hub.engine.prompts import (
     build_direct_messages,
@@ -26,7 +27,7 @@ from knowledge_hub.engine.prompts import (
     refusal_message,
 )
 from knowledge_hub.errors import KhError, LLMTimeout, LLMUnavailable, PermissionDenied
-from knowledge_hub.rag.citations import clean_source_url, resolve_title, trim_snippet
+from knowledge_hub.rag.citations import CitationMarker, clean_source_url, resolve_title, trim_snippet
 from knowledge_hub.rag.retriever import RetrievedChunk, Retriever, RetrieveResult
 from knowledge_hub.rag.textutil import estimate_tokens
 from knowledge_hub.security.tickets import RetrievalTicket
@@ -312,18 +313,22 @@ class ChatEngine:
                         include_debug=False,
                         kb_collections=request.kb_collections,
                     )
-                    if probe is not None:
+                    picked = _pick_prefetch(probe.chunks if probe else [], request.query)
+                    if picked:
                         prefetched = [
                             {
+                                "chunk_id": chunk.chunk_id,
+                                "doc_id": chunk.doc_id,
                                 "text": chunk.text,
                                 "title": chunk.title,
                                 "doc_title": chunk.doc_title or chunk.title,
                                 "title_path": chunk.title_path,
                                 "kind": chunk.kind or chunk.block_type,
                                 "url": chunk.source_url,
+                                "image_url": chunk.image_url,
                                 "score": chunk.score,
                             }
-                            for chunk in probe.chunks[:3]
+                            for chunk in picked
                         ]
                     if prefetched:
                         verdict = _evidence_verdict(prefetched)
@@ -493,6 +498,10 @@ class ChatEngine:
             yield "status", {"stage": "generate"}
 
             produced: list[str] = []
+            # 文末的 [《文档名》] 不是可点来源：按材料标题反查成 [cN] 再下发
+            marker = CitationMarker(
+                [resolve_title(chunk.doc_title, chunk.title_path, chunk.block_type) for chunk in citable]
+            )
             try:
                 async with asyncio.timeout(float(self.settings.llm.stream_timeout_s)):
                     async for delta in self.llm.chat_stream(
@@ -508,7 +517,13 @@ class ChatEngine:
                             _merge_usage(usage, delta.usage)
                         if delta.text:
                             produced.append(delta.text)
-                            yield "token", {"delta": delta.text}
+                            visible = marker.feed(delta.text)
+                            if visible:
+                                yield "token", {"delta": visible}
+                tail = marker.flush()
+                if tail:
+                    produced.append(tail)
+                    yield "token", {"delta": tail}
             except (TimeoutError, LLMTimeout):
                 logger.warning("chat %s generation timed out", request.trace_id)
                 yield "error", _public_error(LLMUnavailable("stream timed out"))
@@ -604,12 +619,9 @@ class ChatEngine:
         raw = (text or "").strip()
         if not raw or "[c" in raw:
             return None
-        # 模型常把澄清写成一段列表 + 一句反问：取最后一个以问号结尾的句子当问题
-        body = ""
-        for line in reversed([item.strip() for item in raw.splitlines() if item.strip()]):
-            if line.endswith("?") or line.endswith("？"):
-                body = line.lstrip("#-*0123456789. ").strip()
-                break
+        # 反问句不一定在行尾：常见写法是「…请问主题是什么？如果是下面几个方向可以直接点选…」。
+        # 所以按句号/换行切段，取最后一段里第一个问号连同前面的文字当问题。
+        body = _question_sentence(raw)
         if not body or len(body) > 300:
             return None
         from knowledge_hub.runtime.agent import _parse_option_list  # noqa: PLC0415 - 避开循环引用
@@ -631,14 +643,13 @@ class ChatEngine:
             choices = response.get("choices") or [{}]
             message = (choices[0] or {}).get("message") or {}
             content = str(message.get("content") or "")
+            options = _parse_option_list(content)
         except Exception as exc:  # noqa: BLE001 - 补候选失败不影响回答
             logger.info("chat %s infer options failed: %s", request.trace_id, type(exc).__name__)
-            return None
-        options = _parse_option_list(content)
+            options = []
         logger.debug("maybe_ask body=%r options=%s", body[:60], options)
-        if len(options) < 2:
-            return None
-        return {"stage": "awaiting_user", "question": body, "options": options}
+        # 候选不足两个时给确定性兜底：反问一定要有可点的按钮，不能退化成“请自己在下面补充”
+        return {"stage": "awaiting_user", "question": body, "options": as_options(options, body)}
 
     async def _delegate_to_agent(
         self,
@@ -659,6 +670,27 @@ class ChatEngine:
         ``initial_context`` 是引擎预检索到的切片，交给 Agent 当初始材料。
         """
         yield "status", {"stage": "agent", "reason": reason}
+        # 预检索材料也是证据：必须把它们当成 c1..cN 发给前端，
+        # 否则正文里的 [c1] 在引用面板里找不到来源（citationCount=0 就是这个原因）。
+        cited = 0
+        for index, chunk in enumerate(list(initial_context or []), start=1):
+            payload = chunk.get("metadata") or chunk if isinstance(chunk, dict) else {}
+            cited += 1
+            yield "citation", {
+                "chunk_id": str(chunk.get("chunk_id") or payload.get("chunk_id") or f"p{index}"),
+                "doc_id": str(chunk.get("doc_id") or payload.get("doc_id") or ""),
+                "title": str(
+                    chunk.get("doc_title") or chunk.get("title") or payload.get("doc_title") or ""
+                ),
+                "title_path": [
+                    str(part)
+                    for part in (chunk.get("title_path") or payload.get("title_path") or [])
+                    if part
+                ],
+                "url": str(chunk.get("url") or chunk.get("source_url") or ""),
+                "snippet": trim_snippet(str(chunk.get("text") or ""), request.query),
+                "score": float(chunk.get("score") or 0.0),
+            }
         # 局部导入：runtime.agent 会 import engine 里的提示词，顶层引入会成环。
         from knowledge_hub.runtime.agent import AgentRequest
 
@@ -718,7 +750,7 @@ class ChatEngine:
             ask_event = await self._maybe_ask("".join(produced), request)
             if ask_event:
                 yield "status", ask_event
-        yield "done", {"usage": usage}
+        yield "done", {"usage": usage, "citationCount": cited}
 
     async def _stream_resume(
         self, request: ChatRequest, ticket: RetrievalTicket, usage: dict[str, Any], started: float
@@ -815,7 +847,10 @@ class ChatEngine:
             len(prefix),
             len("".join(produced)),
         )
-        yield "done", {"usage": usage}
+        yield "done", {
+            "usage": usage,
+            "citationCount": len(chunks),
+        }
 
 
 _GENERIC_ERROR_MESSAGES = {
@@ -841,6 +876,56 @@ def _evidence_verdict(chunks: Sequence[Any]) -> str:
     if len(usable) >= 2:
         return "sufficient"
     return "partial"
+
+
+_IMAGE_INTENT = re.compile(r"图|照片|外观|截图|示意|image|photo|picture", re.I)
+
+
+def _question_sentence(text: str) -> str:
+    """从一段话里找出最后一句反问（问号不一定在末尾）。"""
+    for segment in reversed(re.split(r"[。！!\n]", text or "")):
+        match = re.search(r"[^？?]*[？?]", segment)
+        if match:
+            body = match.group(0).strip().lstrip("#-*0123456789. ").strip()
+            if len(body) >= 2:
+                return body
+    return ""
+
+
+def _pick_prefetch(chunks: Sequence[Any], query: str, *, limit: int = 5) -> list[Any]:
+    """从预取池里挑最终交给 Agent 的材料（默认 5 条）。
+
+    直接在 ``chunks[:3]`` 上截断会有两个坑：
+    1) 同一个文档的相邻切片能占满三条，Agent 以为库里只有这一份文档；
+    2) 问「产品外观图」时图片切片排在第四五名，被截掉，Agent 只能答“没有图”。
+    所以这里做两件事：问图时优先放一张图片切片；其余按文档去重（每篇最多两条）。
+    """
+    pool = [item for item in (chunks or []) if str(getattr(item, "text", "") or "").strip()]
+    if not pool:
+        return []
+
+    def kind_of(item: Any) -> str:
+        return str(getattr(item, "kind", "") or getattr(item, "block_type", "") or "")
+
+    picked: list[Any] = []
+    per_doc: dict[str, int] = {}
+    if _IMAGE_INTENT.search(query or ""):
+        image = next((item for item in pool if kind_of(item) == "image"), None)
+        if image is not None:
+            picked.append(image)
+            doc = str(getattr(image, "doc_title", "") or getattr(image, "doc_id", "") or "")
+            per_doc[doc] = 1
+    for item in pool:
+        if len(picked) >= limit:
+            break
+        if item in picked:
+            continue
+        doc = str(getattr(item, "doc_title", "") or getattr(item, "doc_id", "") or "")
+        if per_doc.get(doc, 0) >= 2:
+            continue
+        per_doc[doc] = per_doc.get(doc, 0) + 1
+        picked.append(item)
+    return picked[:limit]
 
 
 def _skip_prefetch(query: str, capability_answer: str) -> bool:

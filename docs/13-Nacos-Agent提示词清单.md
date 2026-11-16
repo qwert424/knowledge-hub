@@ -180,6 +180,19 @@ AI 控制台 → Prompt → 新建，`Prompt Key` 与表格一致即可。内容
 | 图片 | 保留检索 Agent 给的 Markdown 图片语法原样输出 | 取 URL 并给 `![说明](url)` |
 | 失败 | 如实说"检索失败/证据不足" | `status = unanswerable` + `gaps` |
 
+## 4.5 代码侧兜底（不依赖提示词也能成立）
+
+提示词写对只是第一层，下面这些是**代码强制**的，改提示词不会把它们弄坏：
+
+| 事项 | 位置 | 行为 |
+| --- | --- | --- |
+| 引用标记 | `rag/citations.py::CitationMarker` | 模型写成 `[《文档名》]`／`[《文档名》](链接)` 时，按材料标题反查成 `[cN]`；流式输出会先攥住未闭合的 `[`，不会先发半截再补救 |
+| 图片链接 | `runtime/agent.py::_sanitize_images` | 只保留预取材料 `image_url` 与 `get_bucket_file_url` 返回值里的图片，自己拼的链接降级成文字 |
+| 图片多包一层 | `CitationMarker` | `[![图](u)](u)` 收敛成 `![图](u)`，前端不再套一层链接 |
+| 预取范围 | `engine/chat.py::_pick_prefetch` | 取 5 条、每篇文档最多 2 条；问题含「图/照片/外观」时优先放一张图片切片（带 `image_url`） |
+| 反问候选 | `engine/ask_options.py::as_options` | 模型补不出选项或输出不是 JSON 时，按关键词给确定性候选（PPT→项目汇报/产品介绍…），保证反问一定有按钮 |
+| 预取引用 | `engine/chat.py::_delegate_to_agent` | 预取材料按 c1..cN 下发 `citation` 事件，`done.citationCount` 与之一致 |
+
 
 ---
 

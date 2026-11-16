@@ -231,7 +231,10 @@ async def test_ask_user_question_stops_the_turn(settings: Settings) -> None:
 
     events = await _drain(runtime, AgentRequest(query="住宿标准？", ticket=_ticket()))
 
-    assert ("status", {"stage": "awaiting_user", "question": "你要查哪个城市？", "options": []}) in events
+    ask = next(data for kind, data in events if kind == "status" and data.get("stage") == "awaiting_user")
+    assert ask["question"] == "你要查哪个城市？"
+    # 模型没给候选时必须有确定性兜底，否则前端只能显示“请自己在下面补充”
+    assert len(ask["options"]) >= 2
     assert events[-1][0] == "done"
     assert events[-1][1]["awaiting_user"] is True
 
@@ -515,3 +518,36 @@ def test_render_submission_turns_json_into_markdown() -> None:
     assert "partial" in out
     # 普通正文不被改动
     assert _render_submission("你好") == "你好"
+
+
+def test_sanitize_images_drops_self_invented_links() -> None:
+    """只保留来自检索/工具的图片链接，自拼的降级成文字。"""
+    from knowledge_hub.runtime.agent import _sanitize_images
+
+    allowed = {"http://127.0.0.1:9002/knowledge-hub/feishu-images/ok.png"}
+    text = (
+        "产品外观：\n"
+        "![正面](http://127.0.0.1:9002/knowledge-hub/feishu-images/ok.png)\n"
+        "![背面](http://example.com/made-up.png)"
+    )
+    out = _sanitize_images(text, allowed)
+    assert "feishu-images/ok.png" in out
+    assert "made-up.png" not in out
+    assert "背面" in out
+
+
+def test_sanitize_images_keeps_plain_text() -> None:
+    from knowledge_hub.runtime.agent import _sanitize_images
+
+    assert _sanitize_images("没有图片的回答", set()) == "没有图片的回答"
+
+
+def test_collect_image_urls_from_prefetch() -> None:
+    from knowledge_hub.runtime.agent import _collect_image_urls
+
+    chunks = [
+        {"metadata": {"image_url": "http://x/1.png"}},
+        {"image_url": "http://x/2.png"},
+        {"metadata": {"title": "no image"}},
+    ]
+    assert _collect_image_urls(chunks) == {"http://x/1.png", "http://x/2.png"}

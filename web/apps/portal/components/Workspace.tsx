@@ -203,7 +203,11 @@ export function Workspace() {
   const [queued, setQueued] = useState<{ sessionKey: string; text: string } | null>(null);
   const queuedRef = useRef<{ sessionKey: string; text: string } | null>(null);
   /** Agent 反问（ask_user_question）：带候选时用户可点选，不用重打一遍 */
-  const [askUser, setAskUser] = useState<{ question: string; options: string[] } | null>(null);
+  const [askUser, setAskUser] = useState<{
+    sessionId: string;
+    question: string;
+    options: string[];
+  } | null>(null);
   /** 是否贴着底部：只有贴着时才自动跟随输出，否则显示"回到底部" */
   const [atBottom, setAtBottom] = useState(true);
   const [usageOpen, setUsageOpen] = useState(false);
@@ -491,7 +495,11 @@ export function Workspace() {
               const payload = event.data as { question?: string; options?: string[] };
               const options = (Array.isArray(payload.options) ? payload.options : []).filter(Boolean);
               if (options.length >= 2) {
-                setAskUser({ question: payload.question ?? '请补充更多信息', options });
+                setAskUser({
+                  sessionId,
+                  question: payload.question ?? '请补充更多信息',
+                  options,
+                });
               }
             }
             setMessagesFor(sessionId, (prev) =>
@@ -628,6 +636,8 @@ export function Workspace() {
       if (!text) {
         return;
       }
+      // 用户已经补充了信息：旧的反问卡片不该再挂在输入框上方
+      setAskUser(null);
       // 同一会话只允许一条流在跑：正在回答时再发就排队，避免两条回答同时生成、
       // 也避免"停止"只能停掉最后一条。
       if (streamsRef.current.has(activeKeyRef.current)) {
@@ -1230,7 +1240,8 @@ export function Workspace() {
                   </Button>
                 </div>
               ) : null}
-              {askUser ? (
+              {/* 反问卡片跟着"它属于哪个对话"走：切到别的对话不显示，切回来还能接着点 */}
+              {askUser && askUser.sessionId === activeKey ? (
                 <div
                   style={{
                     marginBottom: 8,

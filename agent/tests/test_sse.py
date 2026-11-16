@@ -752,6 +752,79 @@ def test_skip_prefetch_only_for_greeting_and_capability(settings) -> None:
     assert _skip_prefetch("差旅住宿报销上限是多少？", "") is False
 
 
+def test_pick_prefetch_keeps_image_and_dedupes_documents() -> None:
+    """问图时图片切片必须进材料；同一文档最多占两条。"""
+    from knowledge_hub.engine.chat import _pick_prefetch
+    from knowledge_hub.rag.retriever import RetrievedChunk
+
+    def chunk(doc: str, kind: str = "paragraph", text: str = "正文") -> RetrievedChunk:
+        return RetrievedChunk(
+            chunk_id=f"{doc}-{kind}-{text}",
+            doc_id=doc,
+            title=doc,
+            title_path=[doc],
+            text=text,
+            score=0.5,
+            doc_title=doc,
+            kind=kind,
+        )
+
+    pool = [
+        chunk("A400", text="一"),
+        chunk("A400", text="二"),
+        chunk("A400", text="三"),
+        chunk("A400", kind="image", text="图注：正面外观"),
+        chunk("A200", text="四"),
+    ]
+    picked = _pick_prefetch(pool, "A400 产品外观图", limit=3)
+    assert [item.kind for item in picked][0] == "image"
+    assert len(picked) == 3
+    assert sum(1 for item in picked if item.doc_id == "A400") <= 2
+
+    # 不是问图时不会特意挑图片切片，但文档去重依然生效
+    plain = _pick_prefetch(pool, "差旅住宿报销上限是多少", limit=3)
+    assert len(plain) == 3
+    assert sum(1 for item in plain if item.doc_id == "A400") <= 2
+
+
+async def test_prefetch_passes_image_url_and_citations_to_agent(settings: Settings) -> None:
+    """图片切片的直连地址必须随预取材料交到 Agent，并作为 citation 下发。"""
+
+    class ImageRetriever(FakeRetriever):
+        async def retrieve(self, **kwargs: Any) -> RetrieveResult:  # noqa: ANN401
+            self.calls.append(kwargs)
+            from knowledge_hub.rag.retriever import RetrieveResult
+
+            return RetrieveResult(
+                chunks=[
+                    RetrievedChunk(
+                        chunk_id="img1",
+                        doc_id="doc-a400",
+                        title="A400 产品外观",
+                        title_path=["A400", "产品外观"],
+                        text="图注：正面外观",
+                        score=0.9,
+                        kind="image",
+                        image_url="http://127.0.0.1:9002/knowledge-hub/a400.png",
+                    )
+                ],
+                debug={"dense_ms": 1},
+            )
+
+    engine = _engine(settings, ImageRetriever([]), FakeLLM())
+    agent = FakeAgent(("这是外观图",))
+    engine.agent = agent
+
+    events = await _collect(engine, ChatRequest(query="A400 产品外观图"))
+    handed = agent.requests[0].initial_context
+    assert handed[0]["image_url"] == "http://127.0.0.1:9002/knowledge-hub/a400.png"
+
+    citations = [data for kind, data in events if kind == "citation"]
+    assert citations and citations[0]["chunk_id"] == "img1"
+    done = [data for kind, data in events if kind == "done"][-1]
+    assert done["citationCount"] == 1
+
+
 async def test_skipped_prefetch_still_answers(settings: Settings) -> None:
     """跳过预取时不能把 probe=None 当成结果用（曾经因此整条回答为空）。"""
 
@@ -809,3 +882,29 @@ def test_capability_answer_does_not_hijack_fact_questions(settings) -> None:
     # 业务问题：即使带“能力/工具”字样也不能拦截
     assert engine._capability_answer("差旅制度里的报销流程有哪些？") == ""
     assert engine._capability_answer("工迷通 3.0 连接器支持哪些能力？") == ""
+
+def test_fallback_options_always_offer_choices() -> None:
+    """模型补不出候选时，反问仍要有两个以上可点选项。"""
+    from knowledge_hub.engine.ask_options import as_options, fallback_options
+
+    assert fallback_options("您希望这个PPT的主题是什么？")[:2] == ["项目汇报", "产品介绍"]
+    assert fallback_options("请问需要哪种图片？")[0] == "产品外观图"
+    assert fallback_options("要不要继续") == ["按默认方式继续", "我来补充说明"]
+
+    # 模型只给了一个候选：把兜底项补齐，总数 >= 2
+    merged = as_options(["项目汇报"], "您希望这个PPT的主题是什么？")
+    assert len(merged) >= 2 and "项目汇报" in merged
+    # 模型已经给了两个：原样保留
+    assert as_options(["A", "B"], "随便") == ["A", "B"]
+
+def test_question_sentence_finds_inline_question() -> None:
+    """反问在句中（后面还接了半句说明）时也要能抓到，前端才有候选可点。"""
+    from knowledge_hub.engine.chat import _question_sentence
+
+    text = "好的，我可以帮你制作 PPT。请问这份 PPT 的主题是什么？如果是下面几个方向可以直接点选。"
+    assert _question_sentence(text) == "请问这份 PPT 的主题是什么？"
+
+    # 行尾问号的老写法依然工作
+    assert _question_sentence("您希望主题是什么？") == "您希望主题是什么？"
+    # 没有问号就没有反问
+    assert _question_sentence("这是最终答案。[c1]") == ""
