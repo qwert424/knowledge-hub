@@ -136,11 +136,18 @@ export function toChatStreamEvent(raw: RawSseEvent): ChatStreamEvent | null {
     }
     case 'status': {
       const record = asRecord(parsed);
+      const options = Array.isArray(record?.options)
+        ? (record.options as unknown[]).map((item) => String(item)).filter(Boolean)
+        : [];
       return {
         event: 'status',
         data: {
           stage: asString(record?.stage),
           detail: asString(record?.detail),
+          // 人在回路：下游靠 question/options 渲染可点选按钮，
+          // 之前只保留了 stage/detail，选项在这里就被丢掉了。
+          question: asString(record?.question),
+          options,
         },
       };
     }

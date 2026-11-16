@@ -319,6 +319,7 @@ class AgentRuntime:
             question = _last_assistant_text(messages) or "请补充更多信息。"
         if len(options) < 2:
             options = await self._infer_options(question) or options
+        logger.debug("awaiting_user question=%r options=%s", question[:60], options)
         return {"stage": "awaiting_user", "question": question, "options": options}
 
     async def _infer_options(self, question: str) -> list[str]:

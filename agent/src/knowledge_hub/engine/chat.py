@@ -619,6 +619,7 @@ class ChatEngine:
             logger.info("chat %s infer options failed: %s", request.trace_id, type(exc).__name__)
             return None
         options = _parse_option_list(content)
+        logger.debug("maybe_ask body=%r options=%s", body[:60], options)
         if len(options) < 2:
             return None
         return {"stage": "awaiting_user", "question": body, "options": options}
