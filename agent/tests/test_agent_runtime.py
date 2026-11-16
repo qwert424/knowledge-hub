@@ -496,3 +496,22 @@ def test_capability_block_forbids_inline_task(settings) -> None:
     if "task" in (settings.agent_spec.tools or []):
         assert "task 工具" in block
         assert "<task>" in block
+
+
+def test_render_submission_turns_json_into_markdown() -> None:
+    """子 Agent 的四字段 JSON 要转成主 Agent 好读的正文，不能把 JSON 直接塞回去。"""
+    from knowledge_hub.runtime.agent import _render_submission
+
+    raw = (
+        '{"status":"partial","answer":"住宿上限 600 元。[c1]",'
+        '"sources":[{"title":"差旅报销标准","url":"kh://doc/1"}],'
+        '"gaps":["缺少二线城市数据"]}'
+    )
+    out = _render_submission(raw)
+    assert "{" not in out
+    assert "住宿上限 600 元" in out
+    assert "差旅报销标准" in out
+    assert "缺少二线城市数据" in out
+    assert "partial" in out
+    # 普通正文不被改动
+    assert _render_submission("你好") == "你好"

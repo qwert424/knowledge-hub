@@ -211,6 +211,42 @@ def _builtin_tools(ctx: ToolContext) -> dict[str, Tool]:
             ),
             handler=_ask_user,
         ),
+        "submit_result": Tool(
+            name="submit_result",
+            description=(
+                "以固定结构提交检索结果：只要你是检索子 Agent，"
+                "就必须用它交付，而不是把结论写成普通正文。"
+            ),
+            parameters=_obj(
+                {
+                    "status": {
+                        "type": "string",
+                        "enum": ["answered", "partial", "unanswerable"],
+                        "description": "证据是否足以回答本次检索任务",
+                    },
+                    "answer": _str("可独立阅读的 Markdown 正文，带 [cN] 引用与必要图片"),
+                    "sources": {
+                        "type": "array",
+                        "description": "实际采用的来源，每项 {title, url}；url 确实缺失时用 null",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "url": {"type": ["string", "null"]},
+                            },
+                            "required": ["title"],
+                        },
+                    },
+                    "gaps": {
+                        "type": "array",
+                        "description": "尚缺的条件/材料/对比对象；没有缺口就给空数组",
+                        "items": {"type": "string"},
+                    },
+                },
+                ["status", "answer"],
+            ),
+            handler=_submit_result,
+        ),
         "get_bucket_file_url": Tool(
             name="get_bucket_file_url",
             description="返回对象存储中某个文件的访问地址（需要桶允许直读）。",
@@ -358,7 +394,18 @@ async def _get_current_time(**_kwargs: Any) -> str:
     return now.strftime("%Y-%m-%d %H:%M:%S %Z（%A）")
 
 
-async def _ask_user(
+async def _submit_result(arguments: Mapping[str, Any], ctx: ToolContext) -> str:
+    """检索子 Agent 的结构化交付：把四个字段原样序列化回去，由调用方解析。"""
+    payload = {
+        "status": str(arguments.get("status") or "answered"),
+        "answer": str(arguments.get("answer") or ""),
+        "sources": list(arguments.get("sources") or []),
+        "gaps": [str(item) for item in (arguments.get("gaps") or [])],
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _ask_user(
     question: str, options: Sequence[str] | None = None, **_kwargs: Any
 ) -> str:
     raise AskUser(str(question or "").strip() or "请补充更多信息。", options)

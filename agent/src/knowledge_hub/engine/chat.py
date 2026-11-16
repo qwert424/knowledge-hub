@@ -326,14 +326,25 @@ class ChatEngine:
                             for chunk in probe.chunks[:3]
                         ]
                     if prefetched:
-                        yield "status", {"stage": "prefetch", "hits": len(prefetched)}
+                        verdict = _evidence_verdict(prefetched)
+                        yield "status", {
+                            "stage": "prefetch",
+                            "hits": len(prefetched),
+                            "verdict": verdict,
+                        }
                 except KhError as exc:
                     # 预检索失败不该挡住这一轮：交给 Agent 自己用 web_search / 说明情况
                     logger.warning(
                         "chat %s prefetch failed: %s", request.trace_id or request.conversation_id, exc.code
                     )
                 async for event in self._delegate_to_agent(
-                    request, ticket, usage, started, reason="no_kb_pinned", initial_context=prefetched
+                    request,
+                    ticket,
+                    usage,
+                    started,
+                    reason="no_kb_pinned",
+                    initial_context=prefetched,
+                    evidence_verdict=_evidence_verdict(prefetched),
                 ):
                     yield event
                 return
@@ -638,6 +649,7 @@ class ChatEngine:
         *,
         reason: str = "no_kb_pinned",
         initial_context: Sequence[dict[str, Any]] | None = None,
+        evidence_verdict: str = "",
     ) -> AsyncIterator[Event]:
         """把这一轮交给主 Agent：复用同一个 SSE 契约，前端看不出链路差异。
 
@@ -660,6 +672,7 @@ class ChatEngine:
             conversation_id=request.conversation_id,
             tenant_id=ticket.tenant_id,
             initial_context=list(initial_context or []),
+            evidence_verdict=evidence_verdict,
         )
         produced: list[str] = []
         asked = False
@@ -816,25 +829,37 @@ _GENERIC_ERROR_MESSAGES = {
 }
 
 
-def _skip_prefetch(query: str, capability_answer: str) -> bool:
-    """这类问题不该先去知识库捞一把：能力类、写作/制作类、寒暄。
+def _evidence_verdict(chunks: Sequence[Any]) -> str:
+    """预取结果的证据三态判定：先看有没有命中，再看命中多少。
 
-    它们要么跟企业资料无关，要么需要的是用户补充信息；预取只会把相关度很低的
-    产品文档塞给主 Agent，让它拿这些去凑答案。真需要资料时，主 Agent 自己会委派
-    retrieve_agent。
+    为什么在引擎算：主 Agent 自己猜“够不够”会两边走极端——
+    够了还说资料不足，或拿一条不相关切片硬拼答案。
     """
-    import re as _re
+    usable = [item for item in (chunks or []) if str(getattr(item, "text", "") or "").strip()]
+    if not usable:
+        return "insufficient"
+    if len(usable) >= 2:
+        return "sufficient"
+    return "partial"
 
+
+def _skip_prefetch(query: str, capability_answer: str) -> bool:
+    """只有两类问题不预取：寒暄、能力自述。
+
+    之前用「写/做/PPT/复盘…」的关键词表判断，它会误伤：
+    「帮我写一份差旅报销申请」也带“写”，但它恰恰需要公司规定。
+    现在改成：除非明确不需要证据，一律轻量预取（三条、不重排、很便宜），
+    让证据本身去说话，而不是靠词表猜。
+    """
     text = (query or "").strip()
     if not text:
         return True
     if capability_answer:
         return True
-    if len(text) <= 6:
+    # 寒暄：只有寒暄词、没有实质问题
+    if len(text) <= 6 and re.search("你好|您好|在吗|hi|hello|嗨", text, re.I):
         return True
-    if _re.search("工具|能力|技能|你是谁|你叫什么|你能做什么|tool|skill", text, _re.I):
-        return True
-    if _re.search("写|做|生成|制作|策划|方案|PPT|ppt|复盘|总结|文章|润色|翻译|代码", text):
+    if len(text) <= 3:
         return True
     return False
 

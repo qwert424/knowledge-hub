@@ -62,6 +62,8 @@ class AgentRequest:
     #: 引擎预先检索到的初始材料（没锁定知识库时的一次轻量检索）。
     #: 有它 Agent 不必先调工具就能作答，也仍可继续用 task / web_search 补。
     initial_context: list[dict[str, Any]] = field(default_factory=list)
+    #: 证据充分性判定：sufficient / partial / insufficient；空表示没做判定
+    evidence_verdict: str = ""
 
 
 @dataclass(slots=True)
@@ -212,7 +214,9 @@ class AgentRuntime:
                     preview = _clip(json.dumps(arguments, ensure_ascii=False))
                     yield "tool", {"name": "task", "arguments": preview}
                     try:
-                        result = await self._run_tool(toolset, "task", arguments, ctx)
+                        result = _render_submission(
+                        await self._run_tool(toolset, "task", arguments, ctx)
+                    )
                     except AskUser as ask:
                         payload = await self._ask_payload(messages, ask)
                         yield "status", payload
@@ -791,6 +795,15 @@ def _initial_context_prompt(chunks: Sequence[Mapping[str, Any]], limit: int = 6)
         text = str(chunk.get("text") or chunk.get("page_content") or "").strip()
         lines.append(_clip(text))
         lines.append("")
+    verdict = str(getattr(chunks, "evidence_verdict", "") or "")
+    if verdict and lines:
+        verdict_text = {
+            "sufficient": "当前证据：充分 —— 可直接据此作答。",
+            "partial": "当前证据：部分 —— 先用已有材料作答，并说明缺什么。",
+            "insufficient": "当前证据：不足 —— 需要更多资料时用 task 委派 retrieve_agent。",
+        }.get(verdict, "")
+        if verdict_text:
+            lines.insert(1, verdict_text)
     return "\n".join(lines).strip()
 
 
@@ -863,6 +876,40 @@ def _parse_option_list(text: str) -> list[str]:
         if len(options) >= 6:
             break
     return options if len(options) >= 2 else []
+
+
+def _render_submission(text: str) -> str:
+    """把检索子 Agent 的 submit_result JSON 渲染成主 Agent 好读的正文。
+
+    子 Agent 用固定四字段交付（status/answer/sources/gaps），直接把 JSON 塞回去
+    会让主 Agent 读不懂、也会泄漏给用户；这里转成 Markdown。
+    """
+    import json as _json
+
+    raw = (text or "").strip()
+    if not raw.startswith("{"):
+        return text
+    try:
+        data = _json.loads(raw)
+    except Exception:  # noqa: BLE001 - 不是 JSON 就原样返回
+        return text
+    if not isinstance(data, dict) or "answer" not in data:
+        return text
+    parts = [str(data.get("answer") or "").strip()]
+    sources = data.get("sources") or []
+    links = [
+        f"- {item.get('title')}：{item.get('url')}" if isinstance(item, dict) and item.get("url")
+        else f"- {item.get('title')}" if isinstance(item, dict)
+        else f"- {item}"
+        for item in sources
+    ]
+    if links:
+        parts.append("来源：\n" + "\n".join(links))
+    gaps = [str(item) for item in (data.get("gaps") or [])]
+    if gaps:
+        parts.append("未覆盖：" + "；".join(gaps))
+    parts.append(f"证据状态：{data.get('status')}")
+    return "\n\n".join(part for part in parts if part)
 
 
 def _clip(text: str, limit: int = 1200) -> str:

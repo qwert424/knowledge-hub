@@ -644,7 +644,10 @@ async def test_no_pinned_kb_prefetches_then_delegates_to_main_agent(settings: Se
     )
     names = [name for name, _ in events]
     assert len(retriever.calls) == 1, "没锁库时只跑一次轻量预检索"
-    assert ("status", {"stage": "prefetch", "hits": 1}) in events
+    assert any(
+        kind == "status" and data.get("stage") == "prefetch" and data.get("hits") == 1
+        for kind, data in events
+    )
     assert ("status", {"stage": "agent", "reason": "no_kb_pinned"}) in events
     assert len(agent.requests) == 1
     assert agent.requests[0].initial_context, "预检索命中要作为初始材料交给 Agent"
@@ -737,34 +740,38 @@ async def test_maybe_ask_finds_last_question_line(settings) -> None:
     assert ask["options"] == ["产品介绍", "年度总结"]
 
 
-def test_skip_prefetch_for_meta_and_creation(settings) -> None:
-    """能力类 / 写作类 / 寒暄不预取；真正查事实才预取。"""
+def test_skip_prefetch_only_for_greeting_and_capability(settings) -> None:
+    """只有寒暄与能力自述不预取；写作类也要预取（它可能需要公司规定）。"""
     from knowledge_hub.engine.chat import _skip_prefetch
 
-    assert _skip_prefetch("你有哪些工具可以使用？", "") is True
-    assert _skip_prefetch("帮我做一个 ppt", "") is True
-    assert _skip_prefetch("帮我写一份季度复盘", "") is True
+    assert _skip_prefetch("你有哪些工具可以使用？", "能力清单") is True
     assert _skip_prefetch("你好", "") is True
+    assert _skip_prefetch("嗨", "") is True
+    assert _skip_prefetch("帮我做一个 ppt", "") is False
+    assert _skip_prefetch("帮我写一份差旅报销申请", "") is False
     assert _skip_prefetch("差旅住宿报销上限是多少？", "") is False
 
 
 async def test_skipped_prefetch_still_answers(settings: Settings) -> None:
     """跳过预取时不能把 probe=None 当成结果用（曾经因此整条回答为空）。"""
 
-    class BoomRetriever(FakeRetriever):
+    class EmptyRetriever(FakeRetriever):
         async def retrieve(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-            raise AssertionError("写作类问题不应该走检索")
+            from knowledge_hub.rag.retriever import RetrieveResult
 
-    engine = _engine(settings, BoomRetriever(_chunks()), FakeLLM())
-    engine.agent = FakeAgent(("可以", "开始"))
+            return RetrieveResult(chunks=[], debug={"skipped_kbs": []})
+
+    engine = _engine(settings, EmptyRetriever(_chunks()), FakeLLM())
+    agent = FakeAgent(("可以", "开始"))
+    engine.agent = agent
 
     events = await _collect(engine, ChatRequest(query="帮我做一个 ppt"))
     kinds = [kind for kind, _ in events]
     assert "token" in kinds
     text = "".join(data.get("delta", "") for kind, data in events if kind == "token")
     assert text.strip() == "可以开始"
-    # 预取跟着被跳过，但不应影响主 Agent 给出内容
-    assert any(data.get("skipped") for kind, data in events if kind == "status")
+    # 预取为空时，主 Agent 仍然要能正常给出内容
+    assert agent.requests and "token" in kinds
 
 
 async def test_prefetch_kept_for_lookup_questions(settings: Settings) -> None:
