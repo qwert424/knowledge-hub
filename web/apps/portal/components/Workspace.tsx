@@ -88,7 +88,12 @@ function toUiMessage(message: MessageView): UiMessage {
     serverId: message.id,
     role: message.role === 'user' ? 'user' : 'assistant',
     content: message.content ?? '',
-    status: (message.status as UiMessage['status']) ?? 'completed',
+    // 页面刷新 / 接口中断后，落库里的这条还是 streaming：前端没人接着流了，
+    // 必须显式标成「已中断」，否则会一直停在“正在生成”。
+    status:
+      message.status === 'streaming'
+        ? ('stopped' as UiMessage['status'])
+        : ((message.status as UiMessage['status']) ?? 'completed'),
     citations: message.citations ?? [],
     // 服务端落库的思考链步骤：刷新页面后仍能展开看到这条回答走了哪些阶段
     steps: message.steps && message.steps.length > 0 ? message.steps : undefined,

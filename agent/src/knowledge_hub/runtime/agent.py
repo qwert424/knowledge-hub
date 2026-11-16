@@ -29,7 +29,7 @@ from typing import Any
 
 from knowledge_hub.config.agent_spec import AgentSpec
 from knowledge_hub.config.settings import Settings
-from knowledge_hub.engine.prompts import compose_system_prompt
+from knowledge_hub.engine.prompts import capability_block, compose_system_prompt
 from knowledge_hub.runtime.middleware import Planner, Reviewer, SecurityGuard
 from knowledge_hub.runtime.sandbox import SandboxClient
 from knowledge_hub.runtime.tools import (
@@ -137,6 +137,11 @@ class AgentRuntime:
         }
 
         system_prompt = compose_system_prompt(spec.system_prompt)
+        # 把「你实际有哪些工具/Skill/MCP」写进系统提示词：
+        # 否则用户问“你有什么工具”时，模型只能胡猜或反过来建议用户去委派检索。
+        capabilities = capability_block(spec)
+        if capabilities:
+            system_prompt = f"{system_prompt}\n\n{capabilities}"
         if self.deps.skills is not None and skills:
             system_prompt = f"{system_prompt}\n\n{self.deps.skills.prompt_section(skills)}"
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -537,6 +542,11 @@ class AgentRuntime:
         # 子 Agent 也必须有函数调用，否则它同样会把"想用工具"写成 JSON 正文。
         sub_schemas = toolset.schemas()
         system_prompt = compose_system_prompt(spec.system_prompt)
+        # 把「你实际有哪些工具/Skill/MCP」写进系统提示词：
+        # 否则用户问“你有什么工具”时，模型只能胡猜或反过来建议用户去委派检索。
+        capabilities = capability_block(spec)
+        if capabilities:
+            system_prompt = f"{system_prompt}\n\n{capabilities}"
         if "web_search" in toolset:
             # 企业库里查不到"实时行情/公开网页"这类信息时，必须联网，而不是直接说资料不足。
             system_prompt += (
