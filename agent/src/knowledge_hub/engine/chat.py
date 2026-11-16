@@ -599,9 +599,12 @@ class ChatEngine:
             initial_context=list(initial_context or []),
         )
         produced: list[str] = []
+        asked = False
         try:
             async with asyncio.timeout(float(self.settings.llm.stream_timeout_s) * 3):
                 async for event, data in self.agent.stream(agent_request):
+                    if event == "status" and str(data.get("stage") or "") == "awaiting_user":
+                        asked = True
                     if event == "token":
                         text = data.get("text") or data.get("delta") or ""
                         if text:
@@ -633,9 +636,10 @@ class ChatEngine:
             int((time.perf_counter() - started) * 1000),
             sum(len(text) for text in produced),
         )
-        ask_event = await self._maybe_ask("".join(produced), request)
-        if ask_event:
-            yield "status", ask_event
+        if not asked:
+            ask_event = await self._maybe_ask("".join(produced), request)
+            if ask_event:
+                yield "status", ask_event
         yield "done", {"usage": usage}
 
     async def _stream_resume(

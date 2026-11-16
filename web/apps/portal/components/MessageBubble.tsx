@@ -412,21 +412,6 @@ export function MessageBubble({
         </div>
       ) : null}
 
-      {message.ask && message.ask.options.length > 0 ? (
-        <Space size={8} wrap style={{ marginTop: 8 }}>
-          {message.ask.options.map((option) => (
-            <Button
-              key={option}
-              size="small"
-              onClick={() => onQuickReply?.(option)}
-              disabled={!onQuickReply}
-            >
-              {option}
-            </Button>
-          ))}
-        </Space>
-      ) : null}
-
       {!streaming ? (
         <Space size={2} wrap>
           {message.status === 'stopped' && hasFollowing ? (
