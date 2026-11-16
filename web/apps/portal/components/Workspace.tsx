@@ -1280,7 +1280,7 @@ export function Workspace() {
                     </Space>
                   ) : (
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      直接在下面补充信息即可。
+                      直接在下面输入框补充信息即可（已尝试自动生成候选，本次未能生成）。
                     </Typography.Text>
                   )}
                 </div>

@@ -284,14 +284,27 @@ class ChatEngine:
             kb_selected = bool([str(kb).strip() for kb in request.kb_ids if str(kb).strip()])
             strategy = str(request.profile.get("strategy") or "").lower()
             yield "status", {"stage": "route", "kb_selected": kb_selected}
+            capability_answer = self._capability_answer(request.query)
+            if capability_answer:
+                yield "status", {"stage": "capability"}
+                yield "token", {"delta": capability_answer}
+                usage["output_tokens"] = estimate_tokens(capability_answer)
+                yield "done", {"usage": usage}
+                return
             if not kb_selected and self.agent is not None and strategy != "direct":
                 # 没锁定知识库：先做一次轻量预检索（3 条、不重排，几百毫秒），
                 # 把命中作为"初始材料"交给主 Agent。这样企业制度类问题不依赖
                 # "模型愿不愿意调 task"，实时/公开网页类问题命中为空，Agent 照常用
                 # web_search 处理，也不会多花一次空检索。
                 prefetched: list[dict[str, Any]] = []
+                skip_probe = _skip_prefetch(request.query, self._capability_answer(request.query))
+                if skip_probe:
+                    # 能力类 / 写作类 / 寒暄：预取只会带来无关材料，
+                    # 反而让主 Agent 拿产品文档去回答「你有什么工具」。
+                    yield "status", {"stage": "prefetch", "skipped": True, "reason": "not_a_lookup"}
+                    skip_probe = True
                 try:
-                    probe = await self.retriever.retrieve(
+                    probe = None if skip_probe else await self.retriever.retrieve(
                         ticket=ticket,
                         kb_ids=request.kb_ids,
                         query=request.query,
@@ -525,6 +538,43 @@ class ChatEngine:
             }
             yield "done", {"usage": usage}
 
+    def _capability_answer(self, query: str) -> str:
+        """用户问「你有什么工具 / 能做什么」时，按 Nacos AgentSpec 的事实直接答。
+
+        为什么不交给模型：它会去检索知识库（命中产品文档），然后回答“资料里没提到”，
+        甚至反过来建议用户去委派检索。这类关于自身能力的问题应该确定性回答。
+        """
+        import re as _re
+
+        text = (query or "").strip()
+        if not text or len(text) > 40:
+            return ""
+        pattern = (
+            "工具|tool|技能|skill|能力|能做什么|会什么|能干什么"
+            "|子\\s*agent|subagent"
+        )
+        if not _re.search(pattern, text, _re.I):
+            return ""
+        spec = self.settings.agent_spec
+        tools = [str(item) for item in (spec.tools or [])]
+        if not tools and not spec.subagents:
+            return ""
+        lines = ["我当前实际可用的能力如下："]
+        if tools:
+            lines.append(f"- 可调用工具：{' / '.join(tools)}")
+        if spec.subagents:
+            lines.append(f"- 可委派的子 Agent：{' / '.join(str(s) for s in spec.subagents)}")
+        if spec.skills:
+            lines.append(f"- 可用 Skill：{' / '.join(str(s) for s in spec.skills)}")
+        if spec.mcps:
+            lines.append(f"- 已接入 MCP：{' / '.join(str(m) for m in spec.mcps)}")
+        lines.append("")
+        lines.append(
+            "需要检索企业知识库或联网时，我会委派检索子 Agent；"
+            "需要你补充关键信息时，我会直接给出可点选的选项。"
+        )
+        return chr(10).join(lines)
+
     async def _maybe_ask(
         self, text: str, request: ChatRequest
     ) -> dict[str, Any] | None:
@@ -534,10 +584,16 @@ class ChatEngine:
         不调 ask_user_question 工具，前端就没有按钮可点。这里做一次兜底，
         只在“短、以问号结尾、带要求补充的字样”时才触发，不影响正常回答。
         """
-        body = (text or "").strip()
-        if not body or len(body) > 240 or "[c" in body:
+        raw = (text or "").strip()
+        if not raw or "[c" in raw:
             return None
-        if not (body.endswith("?") or body.endswith("？")):
+        # 模型常把澄清写成一段列表 + 一句反问：取最后一个以问号结尾的句子当问题
+        body = ""
+        for line in reversed([item.strip() for item in raw.splitlines() if item.strip()]):
+            if line.endswith("?") or line.endswith("？"):
+                body = line.lstrip("#-*0123456789. ").strip()
+                break
+        if not body or len(body) > 300:
             return None
         from knowledge_hub.runtime.agent import _parse_option_list  # noqa: PLC0415 - 避开循环引用
 
@@ -746,6 +802,29 @@ _GENERIC_ERROR_MESSAGES = {
     "RETRIEVAL_TIMEOUT": "知识库检索超时，请重新提问；若持续出现请检查向量库是否正常",
     "RETRIEVAL_UNAVAILABLE": "知识库检索暂不可用（向量库未就绪），请稍后重试",
 }
+
+
+def _skip_prefetch(query: str, capability_answer: str) -> bool:
+    """这类问题不该先去知识库捞一把：能力类、写作/制作类、寒暄。
+
+    它们要么跟企业资料无关，要么需要的是用户补充信息；预取只会把相关度很低的
+    产品文档塞给主 Agent，让它拿这些去凑答案。真需要资料时，主 Agent 自己会委派
+    retrieve_agent。
+    """
+    import re as _re
+
+    text = (query or "").strip()
+    if not text:
+        return True
+    if capability_answer:
+        return True
+    if len(text) <= 6:
+        return True
+    if _re.search("工具|能力|技能|你是谁|你叫什么|你能做什么|tool|skill", text, _re.I):
+        return True
+    if _re.search("写|做|生成|制作|策划|方案|PPT|ppt|复盘|总结|文章|润色|翻译|代码", text):
+        return True
+    return False
 
 
 def _public_error(exc: KhError) -> dict[str, Any]:

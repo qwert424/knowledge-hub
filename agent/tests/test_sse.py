@@ -700,3 +700,49 @@ async def test_maybe_ask_only_for_short_clarification(settings) -> None:
     assert await engine._maybe_ask("住宿上限 600 元。[c1]", request) is None
     # 很长的正文不应触发
     assert await engine._maybe_ask("很长" * 200 + "？", request) is None
+
+
+def test_capability_answer_lists_nacos_tools(settings) -> None:
+    """问「你有那些工具」要直接按 AgentSpec 回答，不走模型。"""
+    from knowledge_hub.engine.chat import ChatEngine
+
+    engine = ChatEngine.__new__(ChatEngine)
+    engine.settings = settings
+
+    answer = engine._capability_answer("你有那些工具可以使用？")
+    if settings.agent_spec.tools:
+        assert "可调用工具" in answer
+        for tool in settings.agent_spec.tools:
+            assert tool in answer
+    # 不是能力类问题就不插手
+    assert engine._capability_answer("帮我写一份季度复盘") == ""
+
+
+async def test_maybe_ask_finds_last_question_line(settings) -> None:
+    """模型把澄清写成一段列表 + 一句反问时，也要能补出可选项。"""
+    from knowledge_hub.engine.chat import ChatEngine, ChatRequest
+
+    engine = ChatEngine.__new__(ChatEngine)
+    engine.settings = settings
+
+    class FakeLLM:
+        async def chat(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            return {"choices": [{"message": {"content": '["产品介绍", "年度总结"]'}}]}
+
+    engine.llm = FakeLLM()
+    text = "我需要了解：\n1. 主题\n2. 结构\n3. 风格\n请问您希望做什么主题的 PPT？"
+    ask = await engine._maybe_ask(text, ChatRequest(query="帮我做一个 ppt"))
+    assert ask is not None
+    assert ask["question"] == "请问您希望做什么主题的 PPT？"
+    assert ask["options"] == ["产品介绍", "年度总结"]
+
+
+def test_skip_prefetch_for_meta_and_creation(settings) -> None:
+    """能力类 / 写作类 / 寒暄不预取；真正查事实才预取。"""
+    from knowledge_hub.engine.chat import _skip_prefetch
+
+    assert _skip_prefetch("你有哪些工具可以使用？", "") is True
+    assert _skip_prefetch("帮我做一个 ppt", "") is True
+    assert _skip_prefetch("帮我写一份季度复盘", "") is True
+    assert _skip_prefetch("你好", "") is True
+    assert _skip_prefetch("差旅住宿报销上限是多少？", "") is False
