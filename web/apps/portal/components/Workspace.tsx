@@ -204,8 +204,6 @@ export function Workspace() {
   const queuedRef = useRef<{ sessionKey: string; text: string } | null>(null);
   /** Agent 反问（ask_user_question）：带候选时用户可点选，不用重打一遍 */
   const [askUser, setAskUser] = useState<{ question: string; options: string[] } | null>(null);
-  /** awaiting_user 事件在 state updater 里到达，先存这里，避开 React 的渲染期禁止 setState */
-  const pendingAskRef = useRef<{ question: string; options: string[] } | null>(null);
   /** 是否贴着底部：只有贴着时才自动跟随输出，否则显示"回到底部" */
   const [atBottom, setAtBottom] = useState(true);
   const [usageOpen, setUsageOpen] = useState(false);
@@ -487,6 +485,15 @@ export function Workspace() {
         await runner({
           signal: controller.signal,
           onEvent: (event) => {
+            // 人在回路：候选选项必须在事件回调里直接设，
+            // 不能放进 setMessagesFor 的 updater（那里的 setState 会被丢弃）。
+            if (event.event === 'status' && event.data?.stage === 'awaiting_user') {
+              const payload = event.data as { question?: string; options?: string[] };
+              const options = (Array.isArray(payload.options) ? payload.options : []).filter(Boolean);
+              if (options.length >= 2) {
+                setAskUser({ question: payload.question ?? '请补充更多信息', options });
+              }
+            }
             setMessagesFor(sessionId, (prev) =>
               prev.map((item) => {
                 if (item.id !== assistantLocalId) {
@@ -501,33 +508,13 @@ export function Workspace() {
                 }
                 if (event.event === 'status') {
                   const stage = event.data.stage;
-                  if (stage === 'awaiting_user') {
-                    const payload = event.data as { question?: string; options?: string[] };
-                    // 这里在 setMessagesFor 的 updater 里，直接 setAskUser 会被 React 丢弃；
-                    // 先存 ref，等 updater 执行完再统一设置。
-                    pendingAskRef.current = {
-                      question: payload.question ?? '请补充更多信息',
-                      options: Array.isArray(payload.options) ? payload.options : [],
-                    };
-                  }
                   const label = stage ? stageLabel(stage) : '';
                   const steps = item.steps ?? [];
                   // 同一个阶段只留一条：服务端落库的思考链也是去重的，刷新前后步数才不会跳动
                   if (label && !steps.includes(label)) {
                     return { ...item, stage: stage ?? item.stage, steps: [...steps, label] };
                   }
-                  if (stage === 'awaiting_user') {
-                  const data = event.data as { question?: string; options?: string[] };
-                  return {
-                    ...item,
-                    stage,
-                    ask: {
-                      question: data.question ?? item.content,
-                      options: (data.options ?? []).filter(Boolean),
-                    },
-                  };
-                }
-                return { ...item, stage: stage ?? item.stage };
+                  return { ...item, stage: stage ?? item.stage };
                 }
                 if (event.event === 'notice') {
                   // 后端主动说明（比如自动移除了不可用的知识库）：挂在消息上，顺手刷新库列表
@@ -576,10 +563,6 @@ export function Workspace() {
             );
           },
         });
-        if (pendingAskRef.current) {
-          setAskUser(pendingAskRef.current);
-          pendingAskRef.current = null;
-        }
       } catch (error) {
         if (error instanceof ApiError && error.code === 'ABORTED') {
           setMessagesFor(sessionId, (prev) =>

@@ -412,8 +412,9 @@ class AgentRuntime:
             else:
                 yield "status", {"stage": "security", "blocked": False}
 
-        if text:
-            yield "token", {"text": text}
+        visible = _strip_inline_task(text or "").strip()
+        if visible:
+            yield "token", {"text": visible}
         yield "done", {"usage": usage}
 
     async def _revise(
@@ -820,6 +821,23 @@ def _last_assistant_text(messages: Sequence[Mapping[str, Any]]) -> str:
     return ""
 
 
+def _options_from_lines(text: str) -> list[str]:
+    """从「1. 产品介绍 / - 年度总结」这种行列表里抽 2–6 个短选项。"""
+    import re as _re
+
+    options: list[str] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip().strip("-*• ").strip()
+        line = _re.sub(r"^\d+[.\uff09)]\s*", "", line).strip().strip('"\'「」')
+        if not line or len(line) > 24:
+            continue
+        if line not in options:
+            options.append(line)
+        if len(options) >= 6:
+            break
+    return options if len(options) >= 2 else []
+
+
 def _parse_option_list(text: str) -> list[str]:
     """从模型输出里拿 2–6 个选项（JSON 数组，容忍多余文字）。"""
     import json as _json
@@ -829,13 +847,13 @@ def _parse_option_list(text: str) -> list[str]:
     start = raw.find("[")
     end = raw.rfind("]")
     if start == -1 or end <= start:
-        return []
+        return _options_from_lines(raw)
     try:
         parsed = _json.loads(raw[start : end + 1])
-    except Exception:  # noqa: BLE001 - 解析不了就当没有选项
-        return []
+    except Exception:  # noqa: BLE001 - 不是 JSON 就按行拆（模型常输出 1. 2. 3. 的列表）
+        return _options_from_lines(raw)
     if not isinstance(parsed, list):
-        return []
+        return _options_from_lines(raw)
     options: list[str] = []
     for item in parsed:
         value = _re.sub(r"\s+", " ", str(item)).strip()

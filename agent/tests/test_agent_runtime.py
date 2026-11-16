@@ -467,3 +467,32 @@ def test_last_assistant_text_skips_empty() -> None:
     ]
     assert _last_assistant_text(messages) == "请确认时间范围是？"
     assert _last_assistant_text([{"role": "user", "content": "x"}]) == ""
+
+
+def test_parse_option_list_accepts_plain_lines() -> None:
+    """模型经常不输出 JSON，而是整理成 1. 2. 3. 的行列表。"""
+    from knowledge_hub.runtime.agent import _parse_option_list
+
+    assert _parse_option_list("1. 产品介绍\n2. 年度总结") == ["产品介绍", "年度总结"]
+    assert _parse_option_list("- 本季度\n- 上个月") == ["本季度", "上个月"]
+    assert _parse_option_list("只有一行") == []
+
+
+def test_strip_inline_task_removes_protocol_tag() -> None:
+    """模型把 <task> 当文本吐出来时，用户不能看到内部协议。"""
+    from knowledge_hub.runtime.agent import _strip_inline_task
+
+    raw = '资料中没有今天的黄金价格。<task>{"subagent_type":"retrieve_agent","description":"查黄金"}</task>'
+    cleaned = _strip_inline_task(raw)
+    assert "<task>" not in cleaned and "</task>" not in cleaned
+    assert "资料中没有今天的黄金价格。" in cleaned
+
+
+def test_capability_block_forbids_inline_task(settings) -> None:
+    """能力清单里要明确要求用 task 工具，而不是写标签。"""
+    from knowledge_hub.engine.prompts import capability_block
+
+    block = capability_block(settings.agent_spec)
+    if "task" in (settings.agent_spec.tools or []):
+        assert "task 工具" in block
+        assert "<task>" in block

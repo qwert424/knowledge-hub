@@ -88,6 +88,11 @@ def capability_block(spec: Any) -> str:
         lines.append("- 可使用的 Skill：" + "、".join(skills))
     if mcps:
         lines.append("- 已接入的 MCP：" + "、".join(mcps))
+    if "task" in tools:
+        lines.append(
+            "- 委派检索必须调用 task 工具（subagent_type=retrieve_agent）；"
+            "不要在正文里写 <task>...</task> 标签，用户不应看到内部协议。"
+        )
     if "ask_user_question" in tools:
         lines.append(
             "- 信息不足、且答案本身就是有限几个选项时，必须调用 ask_user_question："
