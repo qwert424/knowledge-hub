@@ -1311,11 +1311,7 @@ export function Workspace() {
                               placeholder="或直接输入"
                               autoComplete="off"
                               name={`kh-ask-${index}`}
-                              value={
-                                askAnswers[index] && !item.options.includes(askAnswers[index])
-                                  ? askAnswers[index]
-                                  : ''
-                              }
+                              value={askAnswers[index] ?? ''}
                               onChange={(event) =>
                                 setAskAnswers((prev) => ({ ...prev, [index]: event.target.value }))
                               }
