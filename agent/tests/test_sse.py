@@ -746,3 +746,44 @@ def test_skip_prefetch_for_meta_and_creation(settings) -> None:
     assert _skip_prefetch("帮我写一份季度复盘", "") is True
     assert _skip_prefetch("你好", "") is True
     assert _skip_prefetch("差旅住宿报销上限是多少？", "") is False
+
+
+async def test_skipped_prefetch_still_answers(settings: Settings) -> None:
+    """跳过预取时不能把 probe=None 当成结果用（曾经因此整条回答为空）。"""
+
+    class BoomRetriever(FakeRetriever):
+        async def retrieve(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            raise AssertionError("写作类问题不应该走检索")
+
+    engine = _engine(settings, BoomRetriever(_chunks()), FakeLLM())
+    engine.agent = FakeAgent(("可以", "开始"))
+
+    events = await _collect(engine, ChatRequest(query="帮我做一个 ppt"))
+    kinds = [kind for kind, _ in events]
+    assert "token" in kinds
+    text = "".join(data.get("delta", "") for kind, data in events if kind == "token")
+    assert text.strip() == "可以开始"
+    # 预取跟着被跳过，但不应影响主 Agent 给出内容
+    assert any(data.get("skipped") for kind, data in events if kind == "status")
+
+
+async def test_prefetch_kept_for_lookup_questions(settings: Settings) -> None:
+    """真正查事实时仍然要预取，并把命中作为初始材料交给主 Agent。"""
+
+    class CountingRetriever(FakeRetriever):
+        def __init__(self) -> None:  # noqa: D107
+            super().__init__(_chunks())
+            self.retrievals = 0
+
+        async def retrieve(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            self.retrievals += 1
+            return await super().retrieve(*args, **kwargs)
+
+    retriever = CountingRetriever()
+    engine = _engine(settings, retriever, FakeLLM())
+    agent = FakeAgent(("住宿", "600 元"))
+    engine.agent = agent
+    events = await _collect(engine, ChatRequest(query="差旅住宿上限是多少？"))
+    assert retriever.retrievals >= 1
+    assert agent.requests and agent.requests[0].initial_context
+    assert "token" in [kind for kind, _ in events]

@@ -312,18 +312,19 @@ class ChatEngine:
                         include_debug=False,
                         kb_collections=request.kb_collections,
                     )
-                    prefetched = [
-                        {
-                            "text": chunk.text,
-                            "title": chunk.title,
-                            "doc_title": chunk.doc_title or chunk.title,
-                            "title_path": chunk.title_path,
-                            "kind": chunk.kind or chunk.block_type,
-                            "url": chunk.source_url,
-                            "score": chunk.score,
-                        }
-                        for chunk in probe.chunks[:3]
-                    ]
+                    if probe is not None:
+                        prefetched = [
+                            {
+                                "text": chunk.text,
+                                "title": chunk.title,
+                                "doc_title": chunk.doc_title or chunk.title,
+                                "title_path": chunk.title_path,
+                                "kind": chunk.kind or chunk.block_type,
+                                "url": chunk.source_url,
+                                "score": chunk.score,
+                            }
+                            for chunk in probe.chunks[:3]
+                        ]
                     if prefetched:
                         yield "status", {"stage": "prefetch", "hits": len(prefetched)}
                 except KhError as exc:
@@ -660,7 +661,9 @@ class ChatEngine:
             async with asyncio.timeout(float(self.settings.llm.stream_timeout_s) * 3):
                 async for event, data in self.agent.stream(agent_request):
                     if event == "status" and str(data.get("stage") or "") == "awaiting_user":
-                        asked = True
+                        # 只有真正带候选的提问才算“已问”；
+                        # 子层发了空 options 的 awaiting_user 时，下面的 _maybe_ask 要能补上。
+                        asked = len(data.get("options") or []) >= 2
                     if event == "token":
                         text = data.get("text") or data.get("delta") or ""
                         if text:
@@ -799,8 +802,11 @@ class ChatEngine:
 _GENERIC_ERROR_MESSAGES = {
     "MODEL_UNAVAILABLE": "模型服务暂时不可用，请稍后重试",
     "INTERNAL_ERROR": "服务内部错误，请稍后重试",
-    "RETRIEVAL_TIMEOUT": "知识库检索超时，请重新提问；若持续出现请检查向量库是否正常",
-    "RETRIEVAL_UNAVAILABLE": "知识库检索暂不可用（向量库未就绪），请稍后重试",
+    "RETRIEVAL_TIMEOUT": "知识库检索超时：向量库响应过慢，请稍后点「重新回答」重试",
+    "RETRIEVAL_UNAVAILABLE": (
+        "知识库检索暂不可用：向量库（Milvus）未就绪或刚重启。"
+        "请稍后点「重新回答」重试；若持续出现，联系管理员检查 Milvus 容器。"
+    ),
 }
 
 
