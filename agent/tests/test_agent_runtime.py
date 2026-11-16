@@ -444,3 +444,26 @@ async def test_inline_task_tag_is_executed_not_passed_through(settings: Settings
     text = "".join(data.get("text", "") for kind, data in events if kind == "token")
     assert "<task>" not in text, "占位标签不能出现在最终回答里"
     assert "今天黄金约 600 元/克" in text
+
+
+def test_parse_option_list_accepts_json_array() -> None:
+    from knowledge_hub.runtime.agent import _parse_option_list
+
+    assert _parse_option_list('["本季度", "上个月", "全年"]') == ["本季度", "上个月", "全年"]
+    # 模型多说了一句也要能拿到数组
+    assert _parse_option_list('好的：["A", "B"]。') == ["A", "B"]
+    # 不足两个就当没有
+    assert _parse_option_list('["只有一个"]') == []
+    assert _parse_option_list("没有数组") == []
+
+
+def test_last_assistant_text_skips_empty() -> None:
+    from knowledge_hub.runtime.agent import _last_assistant_text
+
+    messages = [
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": ""},
+        {"role": "assistant", "content": "请确认时间范围是？"},
+    ]
+    assert _last_assistant_text(messages) == "请确认时间范围是？"
+    assert _last_assistant_text([{"role": "user", "content": "x"}]) == ""

@@ -89,9 +89,10 @@ def capability_block(spec: Any) -> str:
         lines.append("- 已接入的 MCP：" + "、".join(mcps))
     if "ask_user_question" in tools:
         lines.append(
-            "- 信息不足、且答案本身就是有限几个选项时，必须调用 ask_user_question，"
-            "把候选放进 options（最多 6 个）让用户点选；"
-            "不要把选项写成正文列表。"
+            "- 信息不足、且答案本身就是有限几个选项时，必须调用 ask_user_question："
+            "question 必须写清楚要问什么；"
+            "能枚举出候选时 options 必须给 2–6 个，让用户点选；"
+            "不要把选项写成正文列表，也不要在没有工具调用的情况下只输出一句反问。"
         )
     return "\n".join(lines)
 

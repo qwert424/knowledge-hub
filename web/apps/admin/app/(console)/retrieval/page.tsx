@@ -133,7 +133,6 @@ const RAG_FIELD_LABELS: Record<string, string> = {
   sparseTopK: '稀疏召回',
   retrievalTopK: '最终输出 k',
   fusion: '融合策略',
-  rerankEnabled: '重排开关',
   fusionK: '融合基数 k',
   denseWeight: '稠密权重',
   sparseWeight: '稀疏权重',
@@ -301,7 +300,9 @@ export default function RetrievalPage() {
   const weightedMode = String(fusionValue || '').toLowerCase() === 'weighted';
   const fusionEmpty = !String(fusionValue || '').trim();
   const rrfMode = !fusionEmpty && !fusionMode && !weightedMode;
-  const rerankOn = Boolean(rerankValue) || fusionMode;
+  // 重排开关已去掉：只有「模型模式」才会重排，rrf / 权重不再露出重排字段
+  const rerankOn = fusionMode;
+  void rerankValue;
   const graphOn = Boolean(graphValue);
   /** 引擎自身配置：聊天模型与 JEV 决策模型（knowledge-hub.yaml），改了要让引擎 reload */
   const engineConfig = useQuery({

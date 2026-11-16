@@ -209,13 +209,9 @@ class AgentRuntime:
                     try:
                         result = await self._run_tool(toolset, "task", arguments, ctx)
                     except AskUser as ask:
-                        options = getattr(ask, "options", []) or []
-                        yield "status", {
-                            "stage": "awaiting_user",
-                            "question": ask.question,
-                            "options": options,
-                        }
-                        yield "token", {"text": ask.question}
+                        payload = await self._ask_payload(messages, ask)
+                        yield "status", payload
+                        yield "token", {"text": payload["question"]}
                         yield "done", {"usage": usage, "awaiting_user": True}
                         return
                     evidence.append(f"[task] {_clip(result, 800)}")
@@ -241,13 +237,9 @@ class AgentRuntime:
                     try:
                         result = await self._run_tool(toolset, name, arguments, ctx)
                     except AskUser as ask:
-                        options = getattr(ask, "options", []) or []
-                        yield "status", {
-                            "stage": "awaiting_user",
-                            "question": ask.question,
-                            "options": options,
-                        }
-                        yield "token", {"text": ask.question}
+                        payload = await self._ask_payload(messages, ask)
+                        yield "status", payload
+                        yield "token", {"text": payload["question"]}
                         yield "done", {"usage": usage, "awaiting_user": True}
                         return
                     evidence.append(f"[{name}] {_clip(result, 800)}")
@@ -283,13 +275,9 @@ class AgentRuntime:
                 try:
                     result = await self._run_tool(toolset, name, arguments, ctx)
                 except AskUser as ask:
-                    options = getattr(ask, "options", []) or []
-                    yield "status", {
-                        "stage": "awaiting_user",
-                        "question": ask.question,
-                        "options": options,
-                    }
-                    yield "token", {"text": ask.question}
+                    payload = await self._ask_payload(messages, ask)
+                    yield "status", payload
+                    yield "token", {"text": payload["question"]}
                     yield "done", {"usage": usage, "awaiting_user": True}
                     return
                 evidence.append(f"[{name}] {_clip(result, 800)}")
@@ -311,6 +299,49 @@ class AgentRuntime:
             yield event
 
     # --------------------------------------------------------------- internals
+    async def _ask_payload(
+        self, messages: Sequence[Mapping[str, Any]], ask: Any
+    ) -> dict[str, Any]:
+        """把 ``ask_user_question`` 的参数补齐再交给前端。
+
+        模型常带两种毛病：把问题写在正文里而把 question 留空；
+        问的是“选一个”却不给 options。这样前端只能显示一句兜底文案。
+        这里做两件事：空问题用最近一段正文补上；缺候选时让模型就这个问题补几个选项。
+        """
+        question = str(getattr(ask, "question", "") or "").strip()
+        options = [str(item).strip() for item in (getattr(ask, "options", None) or []) if str(item).strip()]
+        if not question:
+            question = _last_assistant_text(messages) or "请补充更多信息。"
+        if len(options) < 2:
+            options = await self._infer_options(question) or options
+        return {"stage": "awaiting_user", "question": question, "options": options}
+
+    async def _infer_options(self, question: str) -> list[str]:
+        """让模型就这个问题给出 2–6 个短选项；拿不到就返回空表。"""
+        prompt = (
+            "用户需要回答下面这个问题：\n"
+            f"{question}\n\n"
+            "请只输出一个 JSON 数组，里面是 2 到 6 个最可能的简短回答选项"
+            "（每项不超过 12 个字），不要输出任何其他内容。"
+        )
+        try:
+            body = await self.deps.llm.chat(
+                [{"role": "user", "content": prompt}],
+                model=(
+                    self.deps.spec.model.name
+                    if getattr(self.deps.spec, "model", None) and self.deps.spec.model.name
+                    else self.deps.settings.chat_model
+                ),
+                temperature=0.0,
+                max_tokens=120,
+                timeout_s=20.0,
+            )
+            content = str(_first_message(body).get("content") or "")
+        except Exception as exc:  # noqa: BLE001 - 补选项失败不能影响提问
+            logger.info("infer options failed: %s", type(exc).__name__)
+            return []
+        return _parse_option_list(content)
+
     async def _make_plan(self, request: AgentRequest, *, tools: Sequence[str]) -> Any:
         planner = self.deps.planner
         if planner is None:
@@ -757,6 +788,50 @@ def _history(history: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         if role in {"user", "assistant"} and content:
             turns.append({"role": role, "content": content})
     return turns
+
+
+def _last_assistant_text(messages: Sequence[Mapping[str, Any]]) -> str:
+    """取最近一段真正对用户说的话（忽略带 tool_calls 的空壳消息）。
+
+    模型把涡问写在正文里、把工具参数留空时，拿它当问题用。
+    """
+    for item in reversed(list(messages)):
+        if str(item.get("role")) != "assistant":
+            continue
+        text = str(item.get("content") or "").strip()
+        if not text:
+            continue
+        # 只取最后一段：模型常把提问放在末尾
+        tail = [line.strip() for line in text.splitlines() if line.strip()]
+        candidate = tail[-1] if tail else text
+        return candidate.lstrip("#-* ").strip()[:300]
+    return ""
+
+
+def _parse_option_list(text: str) -> list[str]:
+    """从模型输出里拿 2–6 个选项（JSON 数组，容忍多余文字）。"""
+    import json as _json
+    import re as _re
+
+    raw = (text or "").strip()
+    start = raw.find("[")
+    end = raw.rfind("]")
+    if start == -1 or end <= start:
+        return []
+    try:
+        parsed = _json.loads(raw[start : end + 1])
+    except Exception:  # noqa: BLE001 - 解析不了就当没有选项
+        return []
+    if not isinstance(parsed, list):
+        return []
+    options: list[str] = []
+    for item in parsed:
+        value = _re.sub(r"\s+", " ", str(item)).strip()
+        if value and len(value) <= 24 and value not in options:
+            options.append(value)
+        if len(options) >= 6:
+            break
+    return options if len(options) >= 2 else []
 
 
 def _clip(text: str, limit: int = 1200) -> str:
