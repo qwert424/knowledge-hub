@@ -51,6 +51,12 @@ class RetrievedChunk:
     kind: str = "paragraph"
     chunk_count: int = 1
     table_row_index: int | None = None
+    #: 块级定位信息：检索子 Agent 靠它继续用 milvus_query 翻上下文
+    block_id: str = ""
+    block_parent_id: str = ""
+    block_order: int = -1
+    references: list[dict[str, Any]] = field(default_factory=list)
+    payload: dict[str, Any] = field(default_factory=dict)
     #: 哪几路召回命中（dense / sparse / graph），调试台据此显示来源
     matched_by: list[str] = field(default_factory=list)
     #: 图片块的直连地址（预签名）；有它模型才能在回答里真的把图带出来
@@ -71,6 +77,9 @@ class RetrievedChunk:
             "table_row_index": self.table_row_index,
             "matched_by": list(self.matched_by),
             "image_url": self.image_url,
+            "block_id": self.block_id,
+            "block_parent_id": self.block_parent_id,
+            "block_order": self.block_order,
             "highlights": self.highlights,
         }
 
@@ -540,6 +549,11 @@ class Retriever:
                     chunk_count=hit.chunk_count or 1,
                     table_row_index=hit.table_row_index,
                     matched_by=list(hit.matched_by),
+                    block_id=hit.block_id,
+                    block_parent_id=hit.block_parent_id,
+                    block_order=hit.block_order,
+                    references=list(hit.references or []),
+                    payload=dict(hit.payload or {}),
                     image_url=self._image_url(hit),
                 )
             )

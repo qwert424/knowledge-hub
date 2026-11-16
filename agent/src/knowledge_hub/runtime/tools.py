@@ -469,7 +469,9 @@ async def _milvus_search(
         kb_ids=list(ctx.kb_ids),
         query=str(query),
         top_k=max(1, min(int(top_k or 6), 20)),
-        debug=False,
+        include_debug=False,
+        # 没有显式 kb_collections 时会落到默认集合上，搜出来的东西不属于当前知识库
+        kb_collections=dict(ctx.kb_collections or {}) or None,
     )
     if not result.chunks:
         return "知识库中没有检索到相关内容。"

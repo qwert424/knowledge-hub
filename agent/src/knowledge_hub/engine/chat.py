@@ -18,6 +18,7 @@ from typing import Any
 from knowledge_hub.config.settings import Settings
 from knowledge_hub.decision.jev import Jev, JevOption, JevResult
 from knowledge_hub.engine.ask_options import as_options, build_questions
+from knowledge_hub.engine.budget import output_budget
 from knowledge_hub.engine.history import compress_history
 from knowledge_hub.engine.prompts import (
     build_direct_messages,
@@ -510,7 +511,7 @@ class ChatEngine:
                         temperature=self.settings.agent_spec.model.temperature
                         if self.settings.agent_spec.model.temperature is not None
                         else self.settings.llm.temperature,
-                        max_tokens=self.settings.llm.max_tokens,
+                        max_tokens=output_budget(request.query, self.settings.llm.max_tokens),
                         extra_body=self._extra_body(),
                     ):
                         if delta.usage:
@@ -831,7 +832,7 @@ class ChatEngine:
                     temperature=self.settings.agent_spec.model.temperature
                     if self.settings.agent_spec.model.temperature is not None
                     else self.settings.llm.temperature,
-                    max_tokens=self.settings.llm.max_tokens,
+                    max_tokens=output_budget(request.query, self.settings.llm.max_tokens),
                     extra_body=self._extra_body(),
                 ):
                     if delta.usage:

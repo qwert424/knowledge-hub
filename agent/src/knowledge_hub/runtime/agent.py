@@ -30,6 +30,7 @@ from typing import Any
 from knowledge_hub.config.agent_spec import AgentSpec
 from knowledge_hub.config.settings import Settings
 from knowledge_hub.engine.ask_options import as_options, build_questions
+from knowledge_hub.engine.budget import output_budget
 from knowledge_hub.engine.prompts import capability_block, compose_system_prompt
 from knowledge_hub.rag.citations import rewrite_citation_markers
 from knowledge_hub.runtime.middleware import Planner, Reviewer, SecurityGuard
@@ -194,7 +195,7 @@ class AgentRuntime:
                     temperature=spec.model.temperature
                     if spec.model.temperature is not None
                     else self.deps.settings.llm.temperature,
-                    max_tokens=self.deps.settings.llm.max_tokens,
+                    max_tokens=output_budget(request.query, self.deps.settings.llm.max_tokens),
                     timeout_s=float(self.deps.settings.env.llm.request_timeout_s),
                     extra_body={"enable_thinking": True} if spec.model.thinking_enabled else None,
                     **({"tools": tool_schemas} if tool_schemas else {}),
@@ -494,7 +495,7 @@ class AgentRuntime:
                 messages,
                 model=self.deps.spec.model.name or self.deps.settings.chat_model,
                 temperature=0.0,
-                max_tokens=self.deps.settings.llm.max_tokens,
+                max_tokens=output_budget(request.query, self.deps.settings.llm.max_tokens),
                 timeout_s=float(self.deps.settings.env.llm.request_timeout_s),
             )
         except Exception:
@@ -616,7 +617,7 @@ class AgentRuntime:
                     temperature=spec.model.temperature
                     if spec.model.temperature is not None
                     else self.deps.settings.llm.temperature,
-                    max_tokens=self.deps.settings.llm.max_tokens,
+                    max_tokens=output_budget(task, self.deps.settings.llm.max_tokens),
                     timeout_s=float(self.deps.settings.env.llm.request_timeout_s),
                     **({"tools": sub_schemas} if sub_schemas else {}),
                 )
@@ -652,6 +653,10 @@ class AgentRuntime:
 
     async def _summarise(self, messages: Sequence[Mapping[str, Any]]) -> str:
         """Ask for a best-effort answer using what the tools already returned."""
+        last_user = next(
+            (str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "user"),
+            "",
+        )
         try:
             body = await self.deps.llm.chat(
                 [
@@ -664,7 +669,7 @@ class AgentRuntime:
                 ],
                 model=self.deps.spec.model.name or self.deps.settings.chat_model,
                 temperature=0.0,
-                max_tokens=self.deps.settings.llm.max_tokens,
+                max_tokens=output_budget(last_user, self.deps.settings.llm.max_tokens),
                 timeout_s=float(self.deps.settings.env.llm.request_timeout_s),
             )
         except Exception:

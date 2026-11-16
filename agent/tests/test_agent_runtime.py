@@ -551,3 +551,69 @@ def test_collect_image_urls_from_prefetch() -> None:
         {"metadata": {"title": "no image"}},
     ]
     assert _collect_image_urls(chunks) == {"http://x/1.png", "http://x/2.png"}
+
+@pytest.mark.asyncio
+async def test_milvus_search_matches_real_retriever_signature(settings: Settings) -> None:
+    """工具必须按 Retriever.retrieve 的真实签名调用。
+
+    曾经传了 `debug=`（真名是 `include_debug=`），线上表现为
+    「工具 milvus_search 参数不正确」，整条检索链路被迫走标量兜底。
+    """
+    from knowledge_hub.rag.retriever import RetrieveResult
+    from knowledge_hub.runtime.tools import ToolContext, build_toolset
+
+    seen: dict[str, Any] = {}
+
+    class StrictRetriever:
+        async def retrieve(
+            self,
+            *,
+            ticket: Any,
+            kb_ids: Any,
+            query: str,
+            profile: Any = None,
+            top_k: int | None = None,
+            include_debug: bool = False,
+            timeout_ms: int | None = None,
+            kb_collections: Any = None,
+            tags: Any = None,
+        ) -> RetrieveResult:
+            seen.update(
+                {
+                    "kb_ids": list(kb_ids),
+                    "query": query,
+                    "top_k": top_k,
+                    "include_debug": include_debug,
+                    "kb_collections": dict(kb_collections or {}),
+                }
+            )
+            return RetrieveResult(chunks=[], debug={})
+
+    ctx = ToolContext(
+        settings=settings,
+        ticket=_ticket(),
+        kb_ids=["kb1"],
+        retriever=StrictRetriever(),
+        kb_collections={"kb1": "kh_kb1_1024"},
+    )
+    tool = build_toolset(["milvus_search"], ctx).tools["milvus_search"]
+
+    output = await tool.handler(query="住宿标准", top_k=3, ctx=ctx)
+
+    assert "没有检索到" in output
+    assert seen["kb_ids"] == ["kb1"]
+    assert seen["top_k"] == 3
+    assert seen["include_debug"] is False
+    # 不带集合映射时会落到默认集合，搜到别的知识库的内容
+    assert seen["kb_collections"] == {"kb1": "kh_kb1_1024"}
+
+
+def test_output_budget_widens_for_long_form() -> None:
+    """长文请求要抬输出上限，否则 10 页 PPT 会写到第 6 页被截断。"""
+    from knowledge_hub.engine.budget import MAX_OUTPUT_TOKENS, output_budget
+
+    assert output_budget("住宿上限是多少？", 2048) == 2048
+    assert output_budget("帮我做一个 10 页的 A400 产品介绍 PPT", 2048) >= 4096
+    assert output_budget("写一份季度复盘，详细展开", 2048) >= 4096
+    # 宽上限也不会超过硬顶
+    assert output_budget("做个 PPT", 99999) <= MAX_OUTPUT_TOKENS

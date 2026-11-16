@@ -198,6 +198,9 @@ def test_retrieved_chunk_contract_shape() -> None:
         "table_row_index",
         "matched_by",
         "image_url",
+        "block_id",
+        "block_parent_id",
+        "block_order",
         "highlights",
     }
     assert body["score"] == 0.123457
