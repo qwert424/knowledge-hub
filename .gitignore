@@ -1,0 +1,54 @@
+# ---- Java / Maven ----
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+.mvn/wrapper/maven-wrapper.properties.bak
+backend/.flattened-pom.xml
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.pyright/
+uv.lock.bak
+dist/
+*.egg-info/
+
+# ---- Node ----
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+coverage/
+
+# ---- Env & secrets ----
+.env
+.env.local
+.env.*.local
+secrets/
+*.pem
+*.key
+
+# ---- IDE / OS ----
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.DS_Store
+Thumbs.db
+
+# ---- Runtime artifacts ----
+logs/
+tmp/
+.data/
+*.log
+# ---- 运行日志 / 临时产物 ----
+*.log
+logs/
+*.bak
+*.tmp
+docs/images/*.tmp

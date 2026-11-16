@@ -1,0 +1,67 @@
+# Bundled defaults, mirroring deploy/nacos/knowledge-hub.yaml.
+# Runtime override chain: Nacos (dataId=knowledge-hub.yaml) -> ${ENV:default} placeholders -> these values.
+llm:
+  chat_model: ${OPENAI_DEFAULT_MODEL:gpt-4.1-mini}
+  base_url: ${LITELLM_BASE_URL:http://127.0.0.1:4000/v1}
+  temperature: 0.2
+  max_tokens: 2048
+
+embedding:
+  model: ${OPENAI_EMBEDDING_MODEL:text-embedding}
+  dimensions: ${EMBEDDING_DIM:1024}
+  batch_size: 10
+  encoding_format: float
+
+chunking:
+  template: general
+  chunk_size: 1000
+  chunk_overlap: 200
+  min_chunk_chars: 40
+  quality:
+    min_tokens: 20
+    max_tokens: 1200
+    drop_pure_navigation: true
+
+retrieval:
+  dense:
+    enabled: true
+    top_k: 20
+    metric: COSINE
+    index: HNSW
+  sparse:
+    enabled: true
+    top_k: 20
+  fusion:
+    strategy: rrf
+    k: 60
+  rerank:
+    enabled: false
+    strategy: rrf
+    top_n: 8
+  graph:
+    enabled: false
+    hops: 2
+    include_communities: true
+  top_k: 8
+
+jev:
+  enabled: true
+  model: ${OPENAI_DEFAULT_MODEL:gpt-4.1-mini}
+  timeout_ms: 3000
+  min_confidence: 0.55
+  scenes:
+    router: true
+    judge: true
+    chunk_quality: false
+    conflict: false
+
+index:
+  max_concurrency: 2
+  embedding_batch_size: 16
+  snapshot_prefix: snapshots
+
+# AgentSpec 名称（Nacos v3 AI 注册表）；缺失时回退到内置提示词并标记 degraded。
+agent:
+  name: knowledge-hub-agent
+  label: production
+  fallback_prompt: ""

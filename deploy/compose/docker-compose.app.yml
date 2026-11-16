@@ -1,0 +1,308 @@
+# Knowledge Hub - application containers only.
+#
+# Middleware is REUSED from the existing RAG stack
+# (ai-infrastructure-rag-practice/docker-compose.yml, project name `deal-pilot-rag`).
+# Reached from inside these containers through host.docker.internal.
+#
+# Usage (always pass the repo-root .env so interpolation matches runtime config):
+#   docker compose --env-file ../../.env -f deploy/compose/docker-compose.app.yml config -q
+#   docker compose --env-file ../../.env -f deploy/compose/docker-compose.app.yml up -d --build
+#
+# The scripts in scripts/ do this for you (see deploy/README.md).
+
+name: knowledge-hub
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# Runtime environment for our own containers.
+# ../../.env = repo root (single source of truth for endpoints / credentials / ports).
+# ../.env  = optional per-deployment overrides (deploy/.env, gitignored, usually absent).
+x-app-env: &app-env
+  - path: ../../.env
+    required: true
+  - path: ../.env
+    required: false
+
+x-extra-hosts: &extra-hosts
+  - "host.docker.internal:host-gateway"
+
+services:
+  # ---------------------------------------------------------------- postgres
+  kh-postgres:
+    image: postgres:17-alpine
+    container_name: kh-postgres
+    restart: unless-stopped
+    env_file: *app-env
+    environment:
+      POSTGRES_USER: ${KH_PG_USER:-kh_app}
+      POSTGRES_PASSWORD: ${KH_PG_PASSWORD:-kh_app_local}
+      POSTGRES_DB: ${KH_PG_DB:-kh}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: ${TZ:-Asia/Shanghai}
+      PGTZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${KH_PG_PORT:-5433}:5432"
+    volumes:
+      - kh_pg_data:/var/lib/postgresql/data
+      - ../docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    logging: *default-logging
+    networks: [kh_net]
+
+  # ------------------------------------------------------------------- redis
+  kh-redis:
+    image: redis:7-alpine
+    container_name: kh-redis
+    restart: unless-stopped
+    environment:
+      KH_REDIS_PASSWORD: ${KH_REDIS_PASSWORD:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    # No password by default; when KH_REDIS_PASSWORD is set it is applied.
+    command:
+      - sh
+      - -c
+      - 'exec redis-server --appendonly yes --save 60 1 $${KH_REDIS_PASSWORD:+--requirepass $${KH_REDIS_PASSWORD}}'
+    ports:
+      - "${KH_REDIS_PORT:-6380}:6379"
+    volumes:
+      - kh_redis_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'redis-cli $${KH_REDIS_PASSWORD:+-a $${KH_REDIS_PASSWORD}} --no-auth-warning ping | grep -q PONG'
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    logging: *default-logging
+    networks: [kh_net]
+
+  # ----------------------------------------------------------------- backend
+  kh-backend:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.backend
+      args:
+        MAVEN_OPTS: ${MAVEN_OPTS:--Xmx1g}
+    image: knowledge-hub/backend:${KH_IMAGE_TAG:-local}
+    container_name: kh-backend
+    restart: unless-stopped
+    env_file: *app-env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      SPRING_PROFILES_ACTIVE: docker
+      APP_ENV: docker
+      SERVER_PORT: "8088"
+      # our own middleware (container network)
+      KH_PG_HOST: kh-postgres
+      KH_PG_PORT: "5432"
+      KH_PG_DB: ${KH_PG_DB:-kh}
+      KH_PG_USER: ${KH_PG_USER:-kh_app}
+      KH_PG_PASSWORD: ${KH_PG_PASSWORD:-kh_app_local}
+      KH_REDIS_HOST: kh-redis
+      KH_REDIS_PORT: "6379"
+      KH_REDIS_PASSWORD: ${KH_REDIS_PASSWORD:-}
+      # reused stack (host gateway)
+      MILVUS_URI: http://host.docker.internal:19530
+      NACOS_SERVER: http://host.docker.internal:8848
+      LITELLM_BASE_URL: http://host.docker.internal:4000/v1
+      MINIO_ENDPOINT: http://host.docker.internal:9002
+      NEO4J_URI: bolt://host.docker.internal:7687
+      LANGFUSE_HOST: http://host.docker.internal:3000
+      # in-compose services
+      RAG_ENGINE_BASE_URL: http://kh-agent:8100
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8088}
+      JWT_PRIVATE_KEY_PATH: /app/secrets/jwt-private.pem
+      JWT_PUBLIC_KEY_PATH: /app/secrets/jwt-public.pem
+      JAVA_OPTS: ${KH_JAVA_OPTS:--XX:MaxRAMPercentage=70 -XX:+UseG1GC}
+    ports:
+      - "${SERVER_PORT:-8088}:8088"
+    extra_hosts: *extra-hosts
+    volumes:
+      - ../../secrets:/app/secrets:ro
+    depends_on:
+      kh-postgres:
+        condition: service_healthy
+      kh-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks: [kh_net]
+
+  # ------------------------------------------------------------- rag engine
+  kh-agent:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.agent
+    image: knowledge-hub/agent:${KH_IMAGE_TAG:-local}
+    container_name: kh-agent
+    restart: unless-stopped
+    env_file: *app-env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      APP_ENV: docker
+      KH_PG_HOST: kh-postgres
+      KH_PG_PORT: "5432"
+      KH_REDIS_HOST: kh-redis
+      KH_REDIS_PORT: "6379"
+      KH_REDIS_PASSWORD: ${KH_REDIS_PASSWORD:-}
+      REDIS_URL: redis://kh-redis:6379/0
+      RAG_ENGINE_PORT: "8100"
+      BACKEND_BASE_URL: http://kh-backend:8088
+      JAVA_INTERNAL_BASE_URL: http://kh-backend:8088
+      MILVUS_URI: http://host.docker.internal:19530
+      NACOS_SERVER: http://host.docker.internal:8848/nacos
+      LITELLM_BASE_URL: http://host.docker.internal:4000/v1
+      MINIO_ENDPOINT: http://host.docker.internal:9002
+      NEO4J_URI: bolt://host.docker.internal:7687
+      LANGFUSE_HOST: http://host.docker.internal:3000
+      JWT_PUBLIC_KEY_PATH: /app/secrets/jwt-public.pem
+      UVICORN_HOST: 0.0.0.0
+      UVICORN_PORT: "8100"
+    ports:
+      - "${RAG_ENGINE_PORT:-8100}:8100"
+    extra_hosts: *extra-hosts
+    volumes:
+      - ../../secrets:/app/secrets:ro
+    depends_on:
+      kh-postgres:
+        condition: service_healthy
+      kh-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8100/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+    logging: *default-logging
+    networks: [kh_net]
+
+  # ------------------------------------------------------------ index worker
+  kh-worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.agent
+    image: knowledge-hub/agent:${KH_IMAGE_TAG:-local}
+    container_name: kh-worker
+    restart: unless-stopped
+    env_file: *app-env
+    command: ["kh-worker"]
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      APP_ENV: docker
+      KH_PG_HOST: kh-postgres
+      KH_PG_PORT: "5432"
+      KH_REDIS_HOST: kh-redis
+      KH_REDIS_PORT: "6379"
+      KH_REDIS_PASSWORD: ${KH_REDIS_PASSWORD:-}
+      REDIS_URL: redis://kh-redis:6379/0
+      BACKEND_BASE_URL: http://kh-backend:8088
+      JAVA_INTERNAL_BASE_URL: http://kh-backend:8088
+      MILVUS_URI: http://host.docker.internal:19530
+      NACOS_SERVER: http://host.docker.internal:8848/nacos
+      LITELLM_BASE_URL: http://host.docker.internal:4000/v1
+      MINIO_ENDPOINT: http://host.docker.internal:9002
+      NEO4J_URI: bolt://host.docker.internal:7687
+      LANGFUSE_HOST: http://host.docker.internal:3000
+      JWT_PUBLIC_KEY_PATH: /app/secrets/jwt-public.pem
+    extra_hosts: *extra-hosts
+    volumes:
+      - ../../secrets:/app/secrets:ro
+      - kh_worker_tmp:/tmp/kh-worker
+    depends_on:
+      kh-postgres:
+        condition: service_healthy
+      kh-redis:
+        condition: service_healthy
+    # worker 是后台消费者，没有 HTTP 端口：不继承镜像里给引擎用的 8100 健康检查，
+    # 否则会一直显示"unhealthy"而其实任务跑得好好的。
+    healthcheck:
+      disable: true
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks: [kh_net]
+
+  # ---------------------------------------------------------------- portal
+  kh-portal:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.web
+      args:
+        APP: portal
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8088}
+    image: knowledge-hub/web-portal:${KH_IMAGE_TAG:-local}
+    container_name: kh-portal
+    restart: unless-stopped
+    env_file: *app-env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      APP: portal
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8088}
+    ports:
+      - "${PORTAL_PORT:-3100}:3000"
+    extra_hosts: *extra-hosts
+    depends_on:
+      kh-backend:
+        condition: service_healthy
+    logging: *default-logging
+    networks: [kh_net]
+
+  # ----------------------------------------------------------------- admin
+  kh-admin:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.web
+      args:
+        APP: admin
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8088}
+    image: knowledge-hub/web-admin:${KH_IMAGE_TAG:-local}
+    container_name: kh-admin
+    restart: unless-stopped
+    env_file: *app-env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      APP: admin
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8088}
+    ports:
+      - "${ADMIN_PORT:-3101}:3000"
+    extra_hosts: *extra-hosts
+    depends_on:
+      kh-backend:
+        condition: service_healthy
+    logging: *default-logging
+    networks: [kh_net]
+
+volumes:
+  kh_pg_data:
+    name: kh_pg_data
+  kh_redis_data:
+    name: kh_redis_data
+  kh_worker_tmp:
+    name: kh_worker_tmp
+
+networks:
+  kh_net:
+    name: kh_net
+    driver: bridge

@@ -1,0 +1,146 @@
+:root {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: #f4f6fa;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.18);
+  border-radius: 8px;
+}
+
+.chat-markdown {
+  font-size: 14.5px;
+  line-height: 1.75;
+  word-break: break-word;
+}
+
+.chat-markdown > *:first-child {
+  margin-top: 0;
+}
+
+.chat-markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.chat-markdown p {
+  margin: 0 0 10px;
+}
+
+.chat-markdown ul,
+.chat-markdown ol {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+
+.chat-markdown code {
+  background: rgba(15, 23, 42, 0.06);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 13px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+}
+
+.chat-markdown pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 10px;
+  padding: 14px 16px;
+  overflow: auto;
+  margin: 0 0 12px;
+}
+
+.chat-markdown pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: 12.5px;
+}
+
+.chat-markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0 0 12px;
+  font-size: 13.5px;
+}
+
+.chat-markdown th,
+.chat-markdown td {
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.chat-markdown blockquote {
+  margin: 0 0 12px;
+  padding: 4px 14px;
+  border-left: 3px solid rgba(31, 111, 235, 0.4);
+  color: rgba(15, 23, 42, 0.7);
+}
+
+/* 流式等待指示：三点呼吸，比"正在生成…"更像产品而不是日志 */
+.kh-dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.kh-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  animation: kh-blink 1.2s infinite ease-in-out;
+}
+
+.kh-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.kh-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes kh-blink {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kh-dots i {
+    animation: none;
+    opacity: 0.6;
+  }
+}

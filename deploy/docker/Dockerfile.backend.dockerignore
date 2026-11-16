@@ -1,0 +1,13 @@
+# Used automatically by Docker for deploy/docker/Dockerfile.backend.
+# Build context is the repository root, so ignore everything except backend/.
+*
+!backend/
+
+# build output / noise
+backend/**/target/
+backend/**/*.class
+backend/.flattened-pom.xml
+**/.git/
+**/.idea/
+**/*.iml
+**/logs/

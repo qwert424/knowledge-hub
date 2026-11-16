@@ -1,0 +1,14 @@
+# Used automatically by Docker for deploy/docker/Dockerfile.agent.
+# Build context is the repository root, so ignore everything except agent/.
+*
+!agent/
+
+agent/.venv/
+agent/**/__pycache__/
+agent/**/*.pyc
+agent/**/.pytest_cache/
+agent/**/.ruff_cache/
+agent/**/.pyright/
+**/.git/
+**/.idea/
+**/logs/

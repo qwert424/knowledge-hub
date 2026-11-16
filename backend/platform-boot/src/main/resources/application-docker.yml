@@ -1,0 +1,15 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://${KH_PG_HOST:kh-postgres}:${KH_PG_PORT:5432}/${KH_PG_DB:kh}?stringtype=unspecified
+  data:
+    redis:
+      host: ${KH_REDIS_HOST:kh-redis}
+      port: ${KH_REDIS_PORT:6379}
+
+kh:
+  integration:
+    storage-endpoint: ${MINIO_ENDPOINT:http://host.docker.internal:9002}
+    engine-base-url: ${RAG_ENGINE_BASE_URL:http://kh-agent:8100}
+    litellm-base-url: ${LITELLM_BASE_URL:http://host.docker.internal:4000/v1}
+    nacos-server: ${NACOS_SERVER:http://host.docker.internal:8848}
+    langfuse-host: ${LANGFUSE_HOST:http://host.docker.internal:3000}

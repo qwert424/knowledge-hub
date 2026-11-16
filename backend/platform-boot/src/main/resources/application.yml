@@ -1,0 +1,111 @@
+server:
+  port: ${SERVER_PORT:8088}
+  shutdown: graceful
+  tomcat:
+    max-swallow-size: -1
+
+spring:
+  application:
+    name: knowledge-hub
+  profiles:
+    active: ${APP_ENV:local}
+  datasource:
+    url: jdbc:postgresql://${KH_PG_HOST:127.0.0.1}:${KH_PG_PORT:5433}/${KH_PG_DB:kh}?stringtype=unspecified
+    username: ${KH_PG_USER:kh_app}
+    password: ${KH_PG_PASSWORD:kh_app_local}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 2
+      connection-timeout: 5000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    validate-on-migrate: false
+  data:
+    redis:
+      host: ${KH_REDIS_HOST:127.0.0.1}
+      port: ${KH_REDIS_PORT:6380}
+      password: ${KH_REDIS_PASSWORD:}
+      timeout: 3s
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+  mvc:
+    async:
+      request-timeout: -1
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    default-enum-type-handler: org.apache.ibatis.type.EnumTypeHandler
+  global-config:
+    banner: false
+    db-config:
+      id-type: input
+      update-strategy: not_null
+
+kh:
+  chat:
+    # 每人每月的用量上限；0 表示不限。超限时发送接口直接返回 429（QUOTA_EXCEEDED）。
+    monthly-token-quota: ${CHAT_MONTHLY_TOKEN_QUOTA:2000000}
+    monthly-message-quota: ${CHAT_MONTHLY_MESSAGE_QUOTA:5000}
+  security:
+    issuer: knowledge-hub
+    secret: ${JWT_SECRET:knowledge-hub-local-development-secret-key-change-me}
+    private-key-path: ${JWT_PRIVATE_KEY_PATH:}
+    public-key-path: ${JWT_PUBLIC_KEY_PATH:}
+    internal-token: ${INTERNAL_SERVICE_TOKEN:internal-local-token}
+    master-key: ${SECRET_MASTER_KEY:}
+    access-token-ttl-minutes: ${ACCESS_TOKEN_TTL_MINUTES:480}
+    refresh-token-ttl-days: 7
+    ticket-ttl-seconds: ${RETRIEVAL_TICKET_TTL_SECONDS:300}
+    cookie-name: kh_token
+  integration:
+    storage-endpoint: ${MINIO_ENDPOINT:http://127.0.0.1:9002}
+    # 浏览器可见的地址：预签名 URL 用它签名，否则浏览器解析不到容器名（表现为 Failed to fetch）
+    storage-public-endpoint: ${MINIO_PUBLIC_ENDPOINT:http://127.0.0.1:9002}
+    storage-access-key: ${MINIO_ACCESS_KEY:}
+    storage-secret-key: ${MINIO_SECRET_KEY:}
+    storage-bucket: ${MINIO_BUCKET:knowledge-hub}
+    presign-expiry-seconds: 900
+    engine-base-url: ${RAG_ENGINE_BASE_URL:http://127.0.0.1:8100}
+    agent-base-url: ${AGENT_BASE_URL:http://127.0.0.1:8123}
+    internal-token: ${INTERNAL_SERVICE_TOKEN:internal-local-token}
+    litellm-base-url: ${LITELLM_BASE_URL:http://127.0.0.1:4000/v1}
+    litellm-api-key: ${LITELLM_API_KEY:}
+    nacos-server: ${NACOS_SERVER:http://127.0.0.1:8848}
+    nacos-namespace: ${NACOS_NAMESPACE:public}
+    nacos-username: ${NACOS_USERNAME:}
+    nacos-password: ${NACOS_PASSWORD:}
+    langfuse-host: ${LANGFUSE_HOST:http://127.0.0.1:3000}
+    langfuse-public-key: ${LANGFUSE_PUBLIC_KEY:}
+    langfuse-secret-key: ${LANGFUSE_SECRET_KEY:}
+    nacos-rag-config-data-id: ${NACOS_RAG_CONFIG_DATA_ID:rag_config}
+    nacos-rag-config-group: ${NACOS_RAG_CONFIG_GROUP:deal_pilot}
+    nacos-console-url: ${NACOS_CONSOLE_URL:http://127.0.0.1:8080}
+    feishu-app-id: ${FEISHU_APP_ID:}
+    feishu-app-secret: ${FEISHU_APP_SECRET:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    root: INFO
+    com.knowledgehub: INFO
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%X{requestId}] %logger{36} - %msg%n"

@@ -1,0 +1,728 @@
+# ============================================================================
+# 知汇平台 Knowledge Hub —— 单一 compose 项目
+#
+#   docker compose -f deploy/compose/docker-compose.yml --profile infra --profile app up -d
+#
+# 1. 只有一个项目名 knowledge-hub，不再有 kh-verify-* 之类的临时容器。
+# 2. 中间件数据卷 external 指向既有卷（deal-pilot_nacos_data 等），
+#    Nacos 配置 / LiteLLM 模型 / Langfuse 密钥 / MinIO 桶 全部复用，无需重配。
+# 3. 所有服务 restart: "no"，开机不自启，只有 scripts/up.ps1 才启动。
+# 4. profiles: infra（中间件） / observability（Langfuse） / graph（Neo4j） / app（本项目）
+# ============================================================================
+name: knowledge-hub
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# 仓库根 .env 是唯一事实源；deploy/.env 可覆盖（gitignored，通常不存在）
+x-app-env: &app-env
+  - path: ../../.env
+    required: true
+  - path: ../.env
+    required: false
+
+x-extra-hosts: &extra-hosts
+  - "host.docker.internal:host-gateway"
+
+services:
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    restart: "no"
+    depends_on: &langfuse-depends-on
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+    environment: &langfuse-worker-env
+      NEXTAUTH_URL: http://localhost:3000
+      DATABASE_URL: postgresql://${LANGFUSE_POSTGRES_USER}:${LANGFUSE_POSTGRES_PASSWORD}@langfuse-postgres:5432/${LANGFUSE_POSTGRES_DB}
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ROOT_USER}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ROOT_USER}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: "true"
+      LANGFUSE_S3_BATCH_EXPORT_BUCKET: langfuse
+      LANGFUSE_S3_BATCH_EXPORT_REGION: auto
+      LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT: http://localhost:9000
+      LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ROOT_USER}
+      LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: "true"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      # Langfuse 事务邮件：成员邀请、密码重置、批量导出完成通知
+      SMTP_CONNECTION_URL: ${LANGFUSE_SMTP_CONNECTION_URL:-}
+      EMAIL_FROM_ADDRESS: ${LANGFUSE_EMAIL_FROM_ADDRESS:-}
+      # Langfuse Ask AI：复用项目现有的 OpenAI 兼容模型配置
+      LANGFUSE_AI_PROVIDER: openai
+      LANGFUSE_AI_MODEL: ${LANGFUSE_OPENAI_DEFAULT_MODEL:-}
+      LANGFUSE_AI_SMALL_MODEL: ${LANGFUSE_OPENAI_DEFAULT_MODEL:-}
+      LANGFUSE_AI_API_KEY: ${LANGFUSE_OPENAI_API_KEY:-}
+      LANGFUSE_AI_BASE_URL: ${LANGFUSE_OPENAI_BASE_URL:-}
+      LANGFUSE_WEBHOOK_WHITELISTED_HOST: ${LANGFUSE_WEBHOOK_WHITELISTED_HOST}
+
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4
+    restart: "no"
+    depends_on: *langfuse-depends-on
+    ports:
+      - 3000:3000
+    environment:
+      <<: *langfuse-worker-env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://langfuse-minio:9000
+
+  langfuse-clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    restart: "no"
+    # 使用Linux用户组101的用户101运行，这是clickhouse官方建议，其实删了也可以
+    # 有一些细节差异，不用管它，留着便是
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+  langfuse-minio:
+    image: cgr.dev/chainguard/minio
+    restart: "no"
+    entrypoint: sh # 容器启动时通过 sh(shell) 执行 command 中配置的命令
+    # 容器启动时执行的命令
+    # mkdir -p /data/langfuse: 为 langfuse 创建存储桶
+    # minio server --address ":9000" --console-address ":9001" /data
+    # 启动 minio 服务，所有的存储桶位置：/data
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${LANGFUSE_MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_ROOT_PASSWORD}
+    ports: # 宿主端口映射
+      - 9000:9000
+      - 9001:9001
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+
+  langfuse-redis:
+    image: docker.io/redis:7
+    restart: "no"
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  # 专为 langfuse 使用的 postgres 数据库
+  langfuse-postgres:
+    image: docker.io/postgres:17
+    # 重启策略
+    # no: 不自动重启，默认值
+    # on-failure: 只有容器以非 0 状态码异常退出时才重启
+    # always: 不管正常退出还是异常退出，都会自动重启
+    # unless-stopped: 手动停止容器后，Docker服务重启仍然保持停止
+    restart: "no"
+    healthcheck: # 健康检查
+      # 运行命令，命令运行成功会将该容器标记为健康
+      test: ["CMD-SHELL", "pg_isready -U ${LANGFUSE_POSTGRES_USER} -d ${LANGFUSE_POSTGRES_DB}"]
+      interval: 3s # 每隔三秒钟运行一次
+      timeout: 3s # 最多等待命令执行3秒
+      retries: 10 # 超时或失败后重试的次数
+    environment: # 启动容器时向它注入环境变量
+      POSTGRES_USER: ${LANGFUSE_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${LANGFUSE_POSTGRES_DB}
+      TZ: Asia/Shanghai # 容器操作系统时区
+      PGTZ: Asia/Shanghai # 客户端会话的时区
+    volumes:
+      # 数据保存到卷柜 langfuse_postgres_data（必须在volumes中有声明）
+      - langfuse_postgres_data:/var/lib/postgresql/data
+
+  litellm:
+    image: litellm/litellm-database:v1.101.0
+    restart: "no"
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      - 4000:4000
+    volumes:
+      - ../infra/litellm-config.yaml:/app/config.yaml:ro
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      UI_USERNAME: ${LITELLM_UI_USERNAME}
+      UI_PASSWORD: ${LITELLM_UI_PASSWORD}
+      DATABASE_URL: postgresql://${LITELLM_POSTGRES_USER}:${LITELLM_POSTGRES_PASSWORD}@litellm-postgres:5432/${LITELLM_POSTGRES_DB}
+      STORE_MODEL_IN_DB: "True"
+      STORE_PROMPTS_IN_SPEND_LOGS: "True"
+      LANGFUSE_TRACING_ENVIRONMENT: gateway
+      OTEL_ENVIRONMENT_NAME: gateway
+      REDIS_HOST: litellm-redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      # config.yaml 中的模型凭据从这些变量读取
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
+      OPENAI_DEFAULT_MODEL: ${OPENAI_DEFAULT_MODEL}
+    depends_on:
+      litellm-postgres:
+        condition: service_healthy
+      litellm-redis:
+        condition: service_healthy
+
+  litellm-postgres:
+    image: docker.io/postgres:17
+    restart: "no"
+    environment:
+      POSTGRES_USER: ${LITELLM_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${LITELLM_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${LITELLM_POSTGRES_DB}
+    volumes:
+      - litellm_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LITELLM_POSTGRES_USER} -d ${LITELLM_POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  litellm-redis:
+    image: docker.io/redis:7
+    restart: "no"
+    volumes:
+      - litellm_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  nacos:
+    image: nacos/nacos-server:v3.2.4-slim
+    # 仅崩溃自动拉起（不做开机自启）：Nacos 掉线会让 Agent 退回内置默认配置
+    restart: on-failure:3
+    environment:
+      MODE: standalone
+      FUNCTION_MODE: all
+      NACOS_AUTH_ENABLE: "true"
+      NACOS_AUTH_TOKEN: ${NACOS_AUTH_TOKEN}
+      NACOS_AUTH_IDENTITY_KEY: ${NACOS_AUTH_IDENTITY_KEY}
+      NACOS_AUTH_IDENTITY_VALUE: ${NACOS_AUTH_IDENTITY_VALUE}
+    ports:
+      - "127.0.0.1:8080:8080" # 控制台
+      - "127.0.0.1:8848:8848" # HTTP 客户端 API
+      - "127.0.0.1:9848:9848" # gRPC 客户端通信
+    volumes:
+      - type: volume
+        source: nacos_data
+        target: /home/nacos/data
+        volume:
+          nocopy: true
+      - nacos_logs:/home/nacos/logs
+      # 插件启停状态：修改本地 JSON 后重启 Nacos 生效。
+      - type: bind
+        source: ../infra/nacos/plugin-states.json
+        target: /home/nacos/data/plugin/plugin-states.json
+        bind:
+          create_host_path: false
+
+  opensandbox-server:
+    image: docker.io/opensandbox/server:release-1.1.0
+    restart: "no"
+    ports:
+      - "127.0.0.1:8090:8090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      SANDBOX_CONFIG_PATH: /etc/opensandbox/config.toml
+      OPENSANDBOX_SERVER_API_KEY: ${OPEN_SANDBOX_API_KEY:?Set OPEN_SANDBOX_API_KEY in .env}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../infra/opensandbox.toml:/etc/opensandbox/config.toml:ro
+      - opensandbox_server_data:/root/.opensandbox
+
+  # 共享对象存储，用于保存 Agent 生成的产物、用户上传的文件
+  shared-minio:
+    image: cgr.dev/chainguard/minio
+    restart: "no"
+    entrypoint: sh
+    command: -c 'minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${SHARED_MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${SHARED_MINIO_ROOT_PASSWORD}
+      MINIO_BROWSER_REDIRECT_URL: http://localhost:9003
+      # 浏览器直传（预签名 PUT）是跨域请求：不放行这两个源就会出现 "Failed to fetch"
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-http://localhost:3100,http://localhost:3101,http://127.0.0.1:3100,http://127.0.0.1:3101}
+    ports:
+      - "127.0.0.1:9002:9000" # 对象存储 API
+      - "127.0.0.1:9003:9001" # 管理控制台
+    volumes:
+      - shared_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+
+  # Milvus Standalone（v3.0.2）：专用 etcd / MinIO，不复用 Shared MinIO，
+  # 也不加载其他项目留下的 milvus_data。仅供 RAG 模块通过 PyMilvus 连接，未开启身份认证。
+  milvus:
+    image: milvusdb/milvus:v3.0.2
+    # 仅崩溃自动拉起，不做开机自启。
+    # Milvus standalone 在宿主机休眠/内存吃紧时会因为 etcd lease 超时以退出码 80 自杀，
+    # 重试次数给足（每次都是全量重新加载元数据，不会破坏数据）。
+    restart: on-failure:20
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      TZ: Asia/Shanghai
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+      MINIO_REGION: us-east-1
+      MINIO_ACCESS_KEY_ID: ${MILVUS_MINIO_ROOT_USER}
+      MINIO_SECRET_ACCESS_KEY: ${MILVUS_MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:19530:19530" # SDK / gRPC
+      - "127.0.0.1:9091:9091" # 健康检查与 WebUI
+    volumes:
+      - milvus_standalone_data:/var/lib/milvus
+      - ../infra/milvus/user.yaml:/milvus/configs/user.yaml:ro
+    depends_on:
+      milvus-etcd:
+        condition: service_healthy
+      milvus-minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # 首次启动要初始化元数据与集合，90 秒内未就绪属正常
+      start_period: 90s
+
+  # Milvus 专用元数据存储，与其他服务无关
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    restart: "no"
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command:
+      - etcd
+      - --advertise-client-urls=http://milvus-etcd:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --data-dir=/etcd
+    volumes:
+      - milvus_standalone_etcd_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Milvus 专用对象存储，只在宿主回环地址暴露，不和 Shared MinIO 争端口
+  milvus-minio:
+    image: milvusdb/minio:RELEASE.2024-12-18T13-15-44Z
+    restart: "no"
+    command: ["minio", "server", "/minio_data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MILVUS_MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MILVUS_MINIO_ROOT_PASSWORD}
+      MINIO_BROWSER_REDIRECT_URL: http://localhost:19001
+    ports:
+      - "127.0.0.1:19000:9000" # Milvus 专用对象存储 API
+      - "127.0.0.1:19001:9001" # Milvus 专用 MinIO 控制台
+    volumes:
+      - milvus_standalone_minio_data:/minio_data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Neo4j Community：GraphRAG 只需要 Bolt + 向量索引，用不上 Bloom / 企业特性。
+  # 放在 graph profile 下，只有 scripts/up.ps1 -WithGraph 才会启动。
+  neo4j:
+    profiles: ["graph"]
+    image: neo4j:5.26-community
+    restart: "no"
+    ports:
+      - "127.0.0.1:7474:7474" # Neo4j Browser
+      - "127.0.0.1:7687:7687" # Bolt
+    environment:
+      # 密码为空时容器直接报错退出，不会启动成免密实例
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-neo4j_local_pw}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      # 独立卷：旧栈的 neo4j_data 是更高版本（2026.x）写的，community 5.x 无法降级读取
+      - neo4j_kh_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          cypher-shell -a bolt://localhost:7687 -u neo4j -p "$${NEO4J_AUTH#neo4j/}"
+          --format plain "RETURN 1 AS ok" > /dev/null
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 45s
+    logging: *default-logging
+
+# 数据卷复用旧项目 deal-pilot 已经在用的那套（Langfuse 项目/密钥、Nacos 配置、LiteLLM 模型、
+# MinIO 桶与凭证都在里面），因此换项目名启动新容器后不需要重新配置任何东西。
+# 两个项目共用同一批数据卷，同一时间只能启动其中一个（端口也是同一套）。
+
+  # ---------------------------------------------------------------- postgres
+  kh-postgres:
+    profiles: ["app"]
+    image: postgres:17-alpine
+    container_name: kh-postgres
+    restart: "no"
+    env_file: *app-env
+    environment:
+      POSTGRES_USER: ${KH_PG_USER:-kh_app}
+      POSTGRES_PASSWORD: ${KH_PG_PASSWORD:-kh_app_local}
+      POSTGRES_DB: ${KH_PG_DB:-kh}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: ${TZ:-Asia/Shanghai}
+      PGTZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${KH_PG_PORT:-5433}:5432"
+    volumes:
+      - kh_pg_data:/var/lib/postgresql/data
+      - ../docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    logging: *default-logging
+  # ------------------------------------------------------------------- redis
+  kh-redis:
+    profiles: ["app"]
+    image: redis:7-alpine
+    container_name: kh-redis
+    restart: "no"
+    environment:
+      KH_REDIS_PASSWORD: ${KH_REDIS_PASSWORD:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    # No password by default; when KH_REDIS_PASSWORD is set it is applied.
+    command:
+      - sh
+      - -c
+      - 'exec redis-server --appendonly yes --save 60 1 $${KH_REDIS_PASSWORD:+--requirepass $${KH_REDIS_PASSWORD}}'
+    ports:
+      - "${KH_REDIS_PORT:-6380}:6379"
+    volumes:
+      - kh_redis_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'redis-cli $${KH_REDIS_PASSWORD:+-a $${KH_REDIS_PASSWORD}} --no-auth-warning ping | grep -q PONG'
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    logging: *default-logging
+  # ----------------------------------------------------------------- backend
+  kh-backend:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.backend
+      args:
+        MAVEN_OPTS: ${MAVEN_OPTS:--Xmx1g}
+    image: knowledge-hub/backend:${KH_IMAGE_TAG:-local}
+    container_name: kh-backend
+    restart: "no"
+    env_file: *app-env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      SPRING_PROFILES_ACTIVE: docker
+      APP_ENV: docker
+      SERVER_PORT: "8088"
+      # our own middleware (container network)
+      KH_PG_HOST: kh-postgres
+      KH_PG_PORT: "5432"
+      KH_PG_DB: ${KH_PG_DB:-kh}
+      KH_PG_USER: ${KH_PG_USER:-kh_app}
+      KH_PG_PASSWORD: ${KH_PG_PASSWORD:-kh_app_local}
+      KH_REDIS_HOST: kh-redis
+      KH_REDIS_PORT: "6379"
+      KH_REDIS_PASSWORD: ${KH_REDIS_PASSWORD:-}
+      # reused stack (host gateway)
+      MILVUS_URI: http://milvus:19530
+      NACOS_SERVER: http://nacos:8848
+      LITELLM_BASE_URL: http://litellm:4000/v1
+      MINIO_ENDPOINT: http://shared-minio:9000
+      # 预签名 URL 里要写浏览器能解析的地址（宿主映射端口），否则直传会 Failed to fetch
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-http://127.0.0.1:9002}
+      NEO4J_URI: bolt://neo4j:7687
+      LANGFUSE_HOST: http://langfuse-web:3000
+      # in-compose services
+      RAG_ENGINE_BASE_URL: http://kh-agent:8100
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8088}
+      JWT_PRIVATE_KEY_PATH: /app/secrets/jwt-private.pem
+      JWT_PUBLIC_KEY_PATH: /app/secrets/jwt-public.pem
+      JAVA_OPTS: ${KH_JAVA_OPTS:--XX:MaxRAMPercentage=70 -XX:+UseG1GC}
+    ports:
+      - "${SERVER_PORT:-8088}:8088"
+    extra_hosts: *extra-hosts
+    volumes:
+      - ../../secrets:/app/secrets:ro
+    depends_on:
+      kh-postgres:
+        condition: service_healthy
+      kh-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    stop_grace_period: 30s
+    logging: *default-logging
+  # ------------------------------------------------------------- rag engine
+  kh-agent:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.agent
+    image: knowledge-hub/agent:${KH_IMAGE_TAG:-local}
+    container_name: kh-agent
+    restart: "no"
+    env_file: *app-env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      APP_ENV: docker
+      KH_PG_HOST: kh-postgres
+      KH_PG_PORT: "5432"
+      KH_REDIS_HOST: kh-redis
+      KH_REDIS_PORT: "6379"
+      KH_REDIS_PASSWORD: ${KH_REDIS_PASSWORD:-}
+      REDIS_URL: redis://kh-redis:6379/0
+      RAG_ENGINE_PORT: "8100"
+      BACKEND_BASE_URL: http://kh-backend:8088
+      JAVA_INTERNAL_BASE_URL: http://kh-backend:8088
+      MILVUS_URI: http://milvus:19530
+      NACOS_SERVER: http://nacos:8848
+      LITELLM_BASE_URL: http://litellm:4000/v1
+      MINIO_ENDPOINT: http://shared-minio:9000
+      NEO4J_URI: bolt://neo4j:7687
+      LANGFUSE_HOST: http://langfuse-web:3000
+      JWT_PUBLIC_KEY_PATH: /app/secrets/jwt-public.pem
+      UVICORN_HOST: 0.0.0.0
+      UVICORN_PORT: "8100"
+    ports:
+      - "${RAG_ENGINE_PORT:-8100}:8100"
+    extra_hosts: *extra-hosts
+    volumes:
+      - ../../secrets:/app/secrets:ro
+    depends_on:
+      kh-postgres:
+        condition: service_healthy
+      kh-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8100/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+    logging: *default-logging
+  # ------------------------------------------------------------ index worker
+  kh-worker:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.agent
+    image: knowledge-hub/agent:${KH_IMAGE_TAG:-local}
+    container_name: kh-worker
+    restart: "no"
+    env_file: *app-env
+    command: ["kh-worker"]
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      APP_ENV: docker
+      KH_PG_HOST: kh-postgres
+      KH_PG_PORT: "5432"
+      KH_REDIS_HOST: kh-redis
+      KH_REDIS_PORT: "6379"
+      KH_REDIS_PASSWORD: ${KH_REDIS_PASSWORD:-}
+      REDIS_URL: redis://kh-redis:6379/0
+      BACKEND_BASE_URL: http://kh-backend:8088
+      JAVA_INTERNAL_BASE_URL: http://kh-backend:8088
+      MILVUS_URI: http://milvus:19530
+      NACOS_SERVER: http://nacos:8848
+      LITELLM_BASE_URL: http://litellm:4000/v1
+      MINIO_ENDPOINT: http://shared-minio:9000
+      NEO4J_URI: bolt://neo4j:7687
+      LANGFUSE_HOST: http://langfuse-web:3000
+      JWT_PUBLIC_KEY_PATH: /app/secrets/jwt-public.pem
+    # The worker runs no HTTP server, so the image's /health healthcheck would
+    # always fail; process liveness is implied by the container staying up.
+    healthcheck:
+      disable: true
+    extra_hosts: *extra-hosts
+    volumes:
+      - ../../secrets:/app/secrets:ro
+      - kh_worker_tmp:/tmp/kh-worker
+    depends_on:
+      kh-postgres:
+        condition: service_healthy
+      kh-redis:
+        condition: service_healthy
+    stop_grace_period: 30s
+    logging: *default-logging
+  # ---------------------------------------------------------------- portal
+  kh-portal:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.web
+      args:
+        APP: portal
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8088}
+    image: knowledge-hub/web-portal:${KH_IMAGE_TAG:-local}
+    container_name: kh-portal
+    restart: "no"
+    env_file: *app-env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      APP: portal
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8088}
+    ports:
+      - "${PORTAL_PORT:-3100}:3000"
+    extra_hosts: *extra-hosts
+    depends_on:
+      kh-backend:
+        condition: service_healthy
+    logging: *default-logging
+  # ----------------------------------------------------------------- admin
+  kh-admin:
+    profiles: ["app"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.web
+      args:
+        APP: admin
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8088}
+    image: knowledge-hub/web-admin:${KH_IMAGE_TAG:-local}
+    container_name: kh-admin
+    restart: "no"
+    env_file: *app-env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      APP: admin
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8088}
+    ports:
+      - "${ADMIN_PORT:-3101}:3000"
+    extra_hosts: *extra-hosts
+    depends_on:
+      kh-backend:
+        condition: service_healthy
+    logging: *default-logging
+
+volumes:
+  langfuse_clickhouse_data:
+    name: deal-pilot_langfuse_clickhouse_data
+    external: true
+  langfuse_clickhouse_logs:
+    name: deal-pilot_langfuse_clickhouse_logs
+    external: true
+  langfuse_minio_data:
+    name: deal-pilot_langfuse_minio_data
+    external: true
+  langfuse_redis_data:
+    name: deal-pilot_langfuse_redis_data
+    external: true
+  langfuse_postgres_data:
+    name: deal-pilot_langfuse_postgres_data
+    external: true
+  litellm_postgres_data:
+    name: deal-pilot_litellm_postgres_data
+    external: true
+  litellm_redis_data:
+    name: deal-pilot_litellm_redis_data
+    external: true
+  nacos_data:
+    name: deal-pilot_nacos_data
+    external: true
+  nacos_logs:
+    name: deal-pilot_nacos_logs
+    external: true
+  opensandbox_server_data:
+    name: deal-pilot_opensandbox_server_data
+    external: true
+  shared_minio_data:
+    name: deal-pilot_shared_minio_data
+    external: true
+  # Milvus 专用卷：显式命名（不带项目前缀），确保是全新卷，
+  # 不会误加载其他项目或旧项目遗留的 milvus 数据。
+  milvus_standalone_data:
+    name: milvus_standalone_data
+  milvus_standalone_etcd_data:
+    name: milvus_standalone_etcd_data
+  milvus_standalone_minio_data:
+    name: milvus_standalone_minio_data
+  # Neo4j 数据卷：community 5.x 独立一卷；旧栈的 neo4j_data(2026.x) 版本更高，不能降级读取
+  neo4j_kh_data:
+    name: neo4j_kh_data
+
+  # ---------------- 本项目自有卷 ----------------
+  kh_pg_data:
+    name: kh_pg_data
+  kh_redis_data:
+    name: kh_redis_data
+  kh_worker_tmp:
+    name: kh_worker_tmp

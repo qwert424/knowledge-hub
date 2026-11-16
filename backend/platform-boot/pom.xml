@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.knowledgehub</groupId>
+    <artifactId>knowledge-hub-backend</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>platform-boot</artifactId>
+  <name>platform-boot</name>
+
+  <dependencies>
+    <dependency><groupId>com.knowledgehub</groupId><artifactId>platform-common</artifactId></dependency>
+    <dependency><groupId>com.knowledgehub</groupId><artifactId>platform-integration</artifactId></dependency>
+    <dependency><groupId>com.knowledgehub</groupId><artifactId>platform-ops</artifactId></dependency>
+    <dependency><groupId>com.knowledgehub</groupId><artifactId>platform-iam</artifactId></dependency>
+    <dependency><groupId>com.knowledgehub</groupId><artifactId>platform-kb</artifactId></dependency>
+    <dependency><groupId>com.knowledgehub</groupId><artifactId>platform-datasource</artifactId></dependency>
+    <dependency><groupId>com.knowledgehub</groupId><artifactId>platform-index</artifactId></dependency>
+    <dependency><groupId>com.knowledgehub</groupId><artifactId>platform-retrieval</artifactId></dependency>
+    <dependency><groupId>com.knowledgehub</groupId><artifactId>platform-chat</artifactId></dependency>
+    <dependency><groupId>com.knowledgehub</groupId><artifactId>platform-eval</artifactId></dependency>
+    <dependency><groupId>com.knowledgehub</groupId><artifactId>platform-graph</artifactId></dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>knowledge-hub</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

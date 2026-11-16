@@ -1,0 +1,67 @@
+# syntax=docker/dockerfile:1
+#
+# Java backend (Spring Boot 3.5 / JDK 21).
+# Build context = repository root:
+#   docker build -f deploy/docker/Dockerfile.backend -t knowledge-hub/backend .
+#
+# Repo has no Maven wrapper, so the official Maven image is used for the build stage.
+
+# ---------------------------------------------------------------- build stage
+FROM maven:3.9-eclipse-temurin-21 AS build
+
+WORKDIR /src
+
+# Poms first so dependency resolution is cached across source-only changes.
+COPY backend/pom.xml ./pom.xml
+COPY backend/platform-common/pom.xml ./platform-common/pom.xml
+COPY backend/platform-integration/pom.xml ./platform-integration/pom.xml
+COPY backend/platform-ops/pom.xml ./platform-ops/pom.xml
+COPY backend/platform-iam/pom.xml ./platform-iam/pom.xml
+COPY backend/platform-kb/pom.xml ./platform-kb/pom.xml
+COPY backend/platform-datasource/pom.xml ./platform-datasource/pom.xml
+COPY backend/platform-index/pom.xml ./platform-index/pom.xml
+COPY backend/platform-retrieval/pom.xml ./platform-retrieval/pom.xml
+COPY backend/platform-chat/pom.xml ./platform-chat/pom.xml
+COPY backend/platform-eval/pom.xml ./platform-eval/pom.xml
+COPY backend/platform-graph/pom.xml ./platform-graph/pom.xml
+COPY backend/platform-boot/pom.xml ./platform-boot/pom.xml
+
+ARG MAVEN_OPTS="-Xmx1g"
+ENV MAVEN_OPTS=${MAVEN_OPTS}
+RUN mvn -B -q -DskipTests dependency:go-offline || true
+
+COPY backend/ ./
+RUN mvn -B -DskipTests package \
+    && test -f platform-boot/target/knowledge-hub.jar
+
+# -------------------------------------------------------------- runtime stage
+FROM eclipse-temurin:21-jre-jammy AS runtime
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 kh \
+    && useradd --uid 10001 --gid kh --create-home --shell /usr/sbin/nologin kh
+
+ENV TZ=Asia/Shanghai \
+    LANG=C.UTF-8 \
+    JAVA_OPTS="-XX:MaxRAMPercentage=70 -XX:+UseG1GC" \
+    SPRING_PROFILES_ACTIVE=docker \
+    APP_ENV=docker \
+    SERVER_PORT=8088
+
+WORKDIR /app
+COPY --from=build --chown=10001:10001 /src/platform-boot/target/knowledge-hub.jar /app/app.jar
+
+# JWT keys are bind-mounted at runtime (deploy/compose/docker-compose.app.yml -> ../../secrets).
+RUN mkdir -p /app/secrets && chown -R 10001:10001 /app
+
+USER 10001:10001
+
+EXPOSE 8088
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=12 \
+    CMD curl -fsS http://127.0.0.1:8088/actuator/health || exit 1
+
+# shell form so JAVA_OPTS is expanded
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -Djava.security.egd=file:/dev/./urandom -jar /app/app.jar"]

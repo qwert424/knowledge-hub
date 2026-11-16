@@ -1,0 +1,19 @@
+{
+  "name": "knowledge-hub-web",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.0.9",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"./apps/*\" dev",
+    "dev:portal": "pnpm --filter portal dev",
+    "dev:admin": "pnpm --filter admin dev",
+    "build": "pnpm --filter admin build && pnpm --filter portal build",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

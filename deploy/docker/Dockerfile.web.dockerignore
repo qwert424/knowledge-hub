@@ -1,0 +1,15 @@
+# Used automatically by Docker for deploy/docker/Dockerfile.web.
+# Build context is the repository root, so ignore everything except web/.
+*
+!web/
+
+web/node_modules/
+web/**/node_modules/
+web/**/.next/
+web/**/out/
+web/**/.turbo/
+web/**/coverage/
+web/**/*.tsbuildinfo
+**/.git/
+**/.idea/
+**/logs/
