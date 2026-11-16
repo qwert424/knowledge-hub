@@ -676,3 +676,27 @@ async def test_weak_evidence_with_selected_kb_still_cites_retrieved_chunks(setti
     assert "citation" in [name for name, _ in events]
     assert events[-1][0] == "done"
 
+
+async def test_maybe_ask_only_for_short_clarification(settings) -> None:
+    """只有“短 + 以问号结尾 + 没引用”的回答才补候选，正常答案不受影响。"""
+    from knowledge_hub.engine.chat import ChatEngine, ChatRequest
+
+    engine = ChatEngine.__new__(ChatEngine)
+    engine.settings = settings
+
+    class FakeLLM:
+        async def chat(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            return {"choices": [{"message": {"content": '["本季度", "上个月"]'}}]}
+
+    engine.llm = FakeLLM()
+    request = ChatRequest(query="帮我写季度复盘")
+
+    ok = await engine._maybe_ask("请确认本次季度复盘的时间范围是？", request)
+    assert ok is not None
+    assert ok["stage"] == "awaiting_user"
+    assert ok["options"] == ["本季度", "上个月"]
+
+    # 带引用的正式回答不应被当成反问
+    assert await engine._maybe_ask("住宿上限 600 元。[c1]", request) is None
+    # 很长的正文不应触发
+    assert await engine._maybe_ask("很长" * 200 + "？", request) is None

@@ -525,6 +525,47 @@ class ChatEngine:
             }
             yield "done", {"usage": usage}
 
+    async def _maybe_ask(
+        self, text: str, request: ChatRequest
+    ) -> dict[str, Any] | None:
+        """回答只有一句反问（没引用、没工具调用）时，补上可点选的候选。
+
+        为什么要在引擎做：模型经常把澄清问题当成普通回答输出，
+        不调 ask_user_question 工具，前端就没有按钮可点。这里做一次兜底，
+        只在“短、以问号结尾、带要求补充的字样”时才触发，不影响正常回答。
+        """
+        body = (text or "").strip()
+        if not body or len(body) > 240 or "[c" in body:
+            return None
+        if not (body.endswith("?") or body.endswith("？")):
+            return None
+        from knowledge_hub.runtime.agent import _parse_option_list  # noqa: PLC0415 - 避开循环引用
+
+        prompt = (
+            "用户需要回答下面这个问题：" + chr(10)
+            + body + chr(10) + chr(10)
+            + "请只输出一个 JSON 数组，里面是 2 到 6 个最可能的简短回答选项"
+            + "（每项不超过 12 个字），不要输出任何其他内容。"
+        )
+        try:
+            response = await self.llm.chat(
+                [{"role": "user", "content": prompt}],
+                model=self.settings.chat_model,
+                temperature=0.0,
+                max_tokens=120,
+                timeout_s=20.0,
+            )
+            choices = response.get("choices") or [{}]
+            message = (choices[0] or {}).get("message") or {}
+            content = str(message.get("content") or "")
+        except Exception as exc:  # noqa: BLE001 - 补候选失败不影响回答
+            logger.info("chat %s infer options failed: %s", request.trace_id, type(exc).__name__)
+            return None
+        options = _parse_option_list(content)
+        if len(options) < 2:
+            return None
+        return {"stage": "awaiting_user", "question": body, "options": options}
+
     async def _delegate_to_agent(
         self,
         request: ChatRequest,
@@ -592,6 +633,9 @@ class ChatEngine:
             int((time.perf_counter() - started) * 1000),
             sum(len(text) for text in produced),
         )
+        ask_event = await self._maybe_ask("".join(produced), request)
+        if ask_event:
+            yield "status", ask_event
         yield "done", {"usage": usage}
 
     async def _stream_resume(
