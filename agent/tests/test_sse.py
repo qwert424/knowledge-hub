@@ -939,3 +939,15 @@ def test_build_questions_splits_multi_ask() -> None:
     assert split_questions("你要查哪个城市？") == []
     # 一个问句里带两个选项不算两个问题
     assert split_questions("请问需要哪个产品的外观图？A200 还是 A400？") == []
+
+def test_imperative_clarification_gets_options() -> None:
+    """模型写成不带问号的祈使句（请确认…）时也要出候选。"""
+    from knowledge_hub.engine.ask_options import build_questions
+    from knowledge_hub.engine.chat import _question_sentence
+
+    text = "请确认 PPT 的主题、受众和篇幅"
+    assert _question_sentence(text) == text
+    questions = build_questions(text)
+    assert [item["question"] for item in questions] == ["PPT 的主题", "受众", "篇幅"]
+    # 普通结论不触发反问
+    assert _question_sentence("A400 系统内存 1 TB。[c8]") == ""

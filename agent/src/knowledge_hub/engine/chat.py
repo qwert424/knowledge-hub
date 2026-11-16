@@ -898,6 +898,11 @@ def _question_sentence(text: str) -> str:
             body = match.group(0).strip().lstrip("#-*0123456789. ").strip()
             if len(body) >= 2:
                 return body
+    # 模型也常把澄清写成不带问号的祈使句：「请确认 PPT 的主题、受众和篇幅」
+    tail = (text or "").strip().splitlines()[-1] if (text or "").strip() else ""
+    tail = tail.strip().lstrip("#-*0123456789. ").strip()
+    if 2 <= len(tail) <= 80 and re.search(r"请(确认|补充|提供|说明|告诉)|需要(知道|了解|确认)|麻烦", tail):
+        return tail
     return ""
 
 

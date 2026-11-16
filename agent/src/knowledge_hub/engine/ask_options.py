@@ -97,6 +97,12 @@ def split_questions(text: str, *, limit: int = 4) -> list[str]:
             pieces.append(raw[mark.end() : end])
     else:
         pieces = _MULTI_SPLIT.split(raw)
+    # 「请确认 PPT 的主题、受众和篇幅」这类顿号列举：都是短语时也拆开
+    if len(pieces) < 2 and "、" in raw:
+        stem = re.sub(r"^\s*(?:请|麻烦)\s*(?:确认|补充|提供|说明|告诉)?\s*", "", raw)
+        listed = [part.strip() for part in stem.replace("和", "、").split("、") if part.strip()]
+        if len(listed) >= 3 and all(len(part) <= 12 for part in listed):
+            pieces = listed
     questions: list[str] = []
     for piece in pieces:
         cleaned = _strip_index(piece).strip(" ；;，,。\n")
