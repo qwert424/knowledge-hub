@@ -51,3 +51,13 @@ cd web; pnpm install; pnpm dev
 ```
 
 默认账号：`admin / Admin@12345`（首次登录强制改密见 TODO）。
+
+截图
+
+![知识问答首页](readmeImg/image.png)
+![知识库管理](readmeImg/image-1.png)
+![检索配置](readmeImg/image-2.png)
+![图谱构建](readmeImg/image-3.png)
+![评测集](readmeImg/image-4.png)
+![引用与溯源](readmeImg/image-5.png)
+![运营看板](readmeImg/image-6.png)

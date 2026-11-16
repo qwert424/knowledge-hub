@@ -28,6 +28,7 @@ import {
   Layout,
   Modal,
   Progress,
+  Input,
   Space,
   Tooltip,
   Typography,
@@ -50,6 +51,11 @@ const COLLAPSED_WIDTH = 64;
  * 这样"新会话"和已有会话可以共用同一套按会话存放的消息状态。
  */
 const NEW_SESSION_KEY = '__new__';
+
+/** 「其他/自定义」类候选：点它应该聚焦输入框，而不是把这句话当答案发出去 */
+function isCustomOption(text: string): boolean {
+  return /其他|其它|自定义|自己(写|描述|填)|我来(写|描述|补充|填)|补充说明|不限定|都可以/.test(text);
+}
 
 /** 后端拉取失败时的兜底文案（正文由管理端配置，见 /api/v1/chat/suggestions） */
 const FALLBACK_SUGGESTIONS = [
@@ -207,7 +213,12 @@ export function Workspace() {
     sessionId: string;
     question: string;
     options: string[];
+    questions?: { question: string; options: string[] }[];
   } | null>(null);
+  /** 多问题小表单里每一行已经选的/填的答案 */
+  const [askAnswers, setAskAnswers] = useState<Record<number, string>>({});
+  /** 点「其他（我来描述）」时 +1，把焦点送回输入框 */
+  const [focusToken, setFocusToken] = useState(0);
   /** 是否贴着底部：只有贴着时才自动跟随输出，否则显示"回到底部" */
   const [atBottom, setAtBottom] = useState(true);
   const [usageOpen, setUsageOpen] = useState(false);
@@ -492,13 +503,26 @@ export function Workspace() {
             // 人在回路：候选选项必须在事件回调里直接设，
             // 不能放进 setMessagesFor 的 updater（那里的 setState 会被丢弃）。
             if (event.event === 'status' && event.data?.stage === 'awaiting_user') {
-              const payload = event.data as { question?: string; options?: string[] };
+              const payload = event.data as {
+                question?: string;
+                options?: string[];
+                questions?: { question?: string; options?: string[] }[];
+              };
               const options = (Array.isArray(payload.options) ? payload.options : []).filter(Boolean);
-              if (options.length >= 2) {
+              // 一次问多件事：每项各自带候选，前端渲染成多行小表单
+              const subQuestions = (Array.isArray(payload.questions) ? payload.questions : [])
+                .map((item) => ({
+                  question: (item?.question ?? '').trim(),
+                  options: (Array.isArray(item?.options) ? item?.options : []).filter(Boolean) as string[],
+                }))
+                .filter((item) => item.question);
+              if (options.length >= 2 || subQuestions.length >= 2) {
+                setAskAnswers({});
                 setAskUser({
                   sessionId,
                   question: payload.question ?? '请补充更多信息',
                   options,
+                  questions: subQuestions.length >= 2 ? subQuestions : undefined,
                 });
               }
             }
@@ -1252,25 +1276,105 @@ export function Workspace() {
                   }}
                 >
                   <Space style={{ width: '100%', justifyContent: 'space-between' }} align="start">
-                    <Typography.Text style={{ fontSize: 13 }}>{askUser.question}</Typography.Text>
+                    <Typography.Text style={{ fontSize: 13 }}>
+                      {askUser.questions ? '需要你补充几项信息（可点选，也可直接输入）' : askUser.question}
+                    </Typography.Text>
                     <Button size="small" type="text" onClick={() => setAskUser(null)}>
                       忽略
                     </Button>
                   </Space>
-                  {askUser.options.length > 0 ? (
-                    <Space size={6} wrap style={{ marginTop: 8 }}>
-                      {askUser.options.map((option) => (
+                  {askUser.questions ? (
+                    <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {askUser.questions.map((item, index) => (
+                        <div key={`${item.question}-${index}`}>
+                          <Typography.Text style={{ fontSize: 12.5 }}>
+                            {index + 1}. {item.question}
+                          </Typography.Text>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                            {item.options
+                              .filter((option) => !isCustomOption(option))
+                              .map((option) => (
+                                <Button
+                                  key={option}
+                                  size="small"
+                                  type={askAnswers[index] === option ? 'primary' : 'default'}
+                                  onClick={() =>
+                                    setAskAnswers((prev) => ({ ...prev, [index]: option }))
+                                  }
+                                >
+                                  {option}
+                                </Button>
+                              ))}
+                            <Input
+                              size="small"
+                              style={{ width: 220 }}
+                              placeholder="或直接输入"
+                              autoComplete="off"
+                              name={`kh-ask-${index}`}
+                              value={
+                                askAnswers[index] && !item.options.includes(askAnswers[index])
+                                  ? askAnswers[index]
+                                  : ''
+                              }
+                              onChange={(event) =>
+                                setAskAnswers((prev) => ({ ...prev, [index]: event.target.value }))
+                              }
+                              onPressEnter={(event) => event.preventDefault()}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                      <div>
                         <Button
-                          key={option}
                           size="small"
+                          type="primary"
+                          disabled={
+                            !Object.entries(askAnswers).some(([, answer]) => Boolean(answer.trim()))
+                          }
                           onClick={() => {
+                            const lines = (askUser.questions ?? [])
+                              .map((item, index) => {
+                                const answer = (askAnswers[index] ?? '').trim();
+                                return answer ? `${item.question}：${answer}` : '';
+                              })
+                              .filter(Boolean);
+                            if (!lines.length) {
+                              return;
+                            }
                             setAskUser(null);
-                            void send(option);
+                            setAskAnswers({});
+                            void send(lines.join('；'));
                           }}
                         >
-                          {option}
+                          提交
                         </Button>
-                      ))}
+                      </div>
+                    </div>
+                  ) : askUser.options.length > 0 ? (
+                    <Space size={6} wrap style={{ marginTop: 8 }}>
+                      {askUser.options.map((option) => {
+                        // 「其他/自定义」不是答案，是“我要自己写”：点它只把焦点交给输入框，
+                        // 别把这句话当消息发出去（否则模型只能再问一遍）。
+                        const custom = isCustomOption(option);
+                        return (
+                          <Button
+                            key={option}
+                            size="small"
+                            type={custom ? 'dashed' : 'default'}
+                            onClick={() => {
+                              if (custom) {
+                                setFocusToken((value) => value + 1);
+                                toast.info('直接在输入框里描述即可，例如：给管理层看的 AI 趋势汇报，约 15 页');
+                                return;
+                              }
+                              setAskUser(null);
+                              void send(option);
+                            }}
+                          >
+                            {option}
+                          </Button>
+                        );
+                      })}
                     </Space>
                   ) : (
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -1353,6 +1457,7 @@ export function Workspace() {
                   void patchSession({ model });
                 }}
                 needLogin={!signedIn}
+                focusToken={focusToken}
               />
               <Typography.Text
                 type="secondary"

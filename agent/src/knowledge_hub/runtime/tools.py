@@ -45,12 +45,33 @@ class AskUser(Exception):
 
     ``options`` carries the candidate answers the UI can turn into buttons, so a
     "选择式追问"（让用户点一下而不是再打一遍）is possible without extra tooling.
+    ``questions`` 支持一次问多件事（主题 / 受众 / 页数），每项各自带候选，
+    前端会渲染成多行小表单而不是一段长问句。
     """
 
-    def __init__(self, question: str, options: Sequence[str] | None = None) -> None:
+    def __init__(
+        self,
+        question: str,
+        options: Sequence[str] | None = None,
+        questions: Sequence[Any] | None = None,
+    ) -> None:
         super().__init__(question)
         self.question = question
         self.options = [str(item).strip() for item in (options or []) if str(item).strip()][:6]
+        self.questions: list[dict[str, Any]] = []
+        for item in questions or []:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("question") or "").strip()
+            if not text:
+                continue
+            raw = item.get("options") or []
+            self.questions.append(
+                {
+                    "question": text,
+                    "options": [str(opt).strip() for opt in raw if str(opt).strip()][:6],
+                }
+            )
 
 
 @dataclass(slots=True)
@@ -195,16 +216,33 @@ def _builtin_tools(ctx: ToolContext) -> dict[str, Tool]:
         "ask_user_question": Tool(
             name="ask_user_question",
             description=(
-                "信息不足且必须由用户补充时，向用户提出一个明确的问题并结束本轮。"
+                "信息不足且必须由用户补充时，向用户提问并结束本轮。"
                 "如果答案是有限的几个选项，请用 options 给出候选，用户可以直接点选。"
+                "需要同时确认多件事（例如 PPT 的主题、受众、页数）时，"
+                "用 questions 一次问清，每项自带 options，前端会渲染成多行小表单。"
             ),
             parameters=_obj(
                 {
-                    "question": _str("要问用户的问题"),
+                    "question": _str("要问用户的问题（一句话概括）"),
                     "options": {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "候选答案（可选，最多 6 个）",
+                    },
+                    "questions": {
+                        "type": "array",
+                        "description": "一次问多件事时使用；每项 {question, options}",
+                        "items": _obj(
+                            {
+                                "question": _str("子问题"),
+                                "options": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "该子问题的候选（可选）",
+                                },
+                            },
+                            ["question"],
+                        ),
                     },
                 },
                 ["question"],
@@ -406,9 +444,12 @@ async def _submit_result(arguments: Mapping[str, Any], ctx: ToolContext) -> str:
 
 
 def _ask_user(
-    question: str, options: Sequence[str] | None = None, **_kwargs: Any
+    question: str,
+    options: Sequence[str] | None = None,
+    questions: Sequence[Any] | None = None,
+    **_kwargs: Any,
 ) -> str:
-    raise AskUser(str(question or "").strip() or "请补充更多信息。", options)
+    raise AskUser(str(question or "").strip() or "请补充更多信息。", options, questions)
 
 
 async def _get_bucket_file_url(

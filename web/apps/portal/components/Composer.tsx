@@ -38,6 +38,7 @@ export function Composer({
   onModelChange,
   disabled,
   needLogin,
+  focusToken,
 }: {
   value: string;
   onChange: (next: string) => void;
@@ -54,12 +55,21 @@ export function Composer({
   onSteer?: (mode: 'interrupt' | 'queue') => void;
   disabled?: boolean;
   needLogin?: boolean;
+  /** 每次变化把焦点落到输入框（点「其他（我来描述）」这类候选用） */
+  focusToken?: number;
 }) {
   const { token } = theme.useToken();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [composing, setComposing] = useState(false);
   /** 知识库是可多选的：用 Popover 持有自己的开关，点一项不会像菜单那样收起来 */
   const [kbOpen, setKbOpen] = useState(false);
+
+  useEffect(() => {
+    if (!focusToken) {
+      return;
+    }
+    textareaRef.current?.focus();
+  }, [focusToken]);
 
   useEffect(() => {
     const el = textareaRef.current;

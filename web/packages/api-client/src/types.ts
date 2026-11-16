@@ -422,7 +422,17 @@ export interface ChatUsage {
 
 export type ChatStreamEvent =
   | { event: 'start'; data: { messageId?: string } }
-  | { event: 'status'; data: { stage?: string; question?: string; options?: string[]; detail?: string } }
+  | {
+      event: 'status';
+      data: {
+        stage?: string;
+        question?: string;
+        options?: string[];
+        /** 一次问多件事：每项 {question, options}，前端渲染成多行小表单 */
+        questions?: { question: string; options: string[] }[];
+        detail?: string;
+      };
+    }
   | { event: 'tool'; data: { name?: string; arguments?: string } }
   | { event: 'token'; data: { delta: string } }
   | { event: 'citation'; data: ChatCitation }

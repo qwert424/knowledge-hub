@@ -29,7 +29,7 @@ from typing import Any
 
 from knowledge_hub.config.agent_spec import AgentSpec
 from knowledge_hub.config.settings import Settings
-from knowledge_hub.engine.ask_options import as_options
+from knowledge_hub.engine.ask_options import as_options, build_questions
 from knowledge_hub.engine.prompts import capability_block, compose_system_prompt
 from knowledge_hub.rag.citations import rewrite_citation_markers
 from knowledge_hub.runtime.middleware import Planner, Reviewer, SecurityGuard
@@ -336,12 +336,32 @@ class AgentRuntime:
         options = [str(item).strip() for item in (getattr(ask, "options", None) or []) if str(item).strip()]
         if not question:
             question = _last_assistant_text(messages) or "请补充更多信息。"
+        payload_questions = list(getattr(ask, "questions", None) or [])
+        if payload_questions:
+            options = [str(item) for item in payload_questions[0].get("options") or []]
         if len(options) < 2:
             options = await self._infer_options(question) or options
         # 还不足两个就上确定性兜底：反问必须能点，不能只剩“请自己在下面补充”
-        options = as_options(options, question)
+        payload: dict[str, Any] = {
+            "stage": "awaiting_user",
+            "question": question,
+            "options": as_options(options, question),
+        }
+        # 模型一次问多件事时：每项各自带候选交给前端渲染成小表单
+        questions = [
+            {
+                "question": str(item.get("question") or "").strip(),
+                "options": as_options(item.get("options") or [], str(item.get("question") or "")),
+            }
+            for item in payload_questions
+            if str(item.get("question") or "").strip()
+        ]
+        if not questions:
+            questions = build_questions(question)
+        if questions:
+            payload["questions"] = questions
         logger.debug("awaiting_user question=%r options=%s", question[:60], options)
-        return {"stage": "awaiting_user", "question": question, "options": options}
+        return payload
 
     async def _infer_options(self, question: str) -> list[str]:
         """让模型就这个问题给出 2–6 个短选项；拿不到就返回空表。"""

@@ -697,7 +697,9 @@ async def test_maybe_ask_only_for_short_clarification(settings) -> None:
     ok = await engine._maybe_ask("请确认本次季度复盘的时间范围是？", request)
     assert ok is not None
     assert ok["stage"] == "awaiting_user"
-    assert ok["options"] == ["本季度", "上个月"]
+    # 末尾固定追加“我来描述”的自由输入项（点它只聚焦输入框，不当消息发出）
+    assert ok["options"][:2] == ["本季度", "上个月"]
+    assert ok["options"][-1] == "其他（我来描述）"
 
     # 带引用的正式回答不应被当成反问
     assert await engine._maybe_ask("住宿上限 600 元。[c1]", request) is None
@@ -737,7 +739,8 @@ async def test_maybe_ask_finds_last_question_line(settings) -> None:
     ask = await engine._maybe_ask(text, ChatRequest(query="帮我做一个 ppt"))
     assert ask is not None
     assert ask["question"] == "请问您希望做什么主题的 PPT？"
-    assert ask["options"] == ["产品介绍", "年度总结"]
+    assert ask["options"][:2] == ["产品介绍", "年度总结"]
+    assert ask["options"][-1] == "其他（我来描述）"
 
 
 def test_skip_prefetch_only_for_greeting_and_capability(settings) -> None:
@@ -895,7 +898,13 @@ def test_fallback_options_always_offer_choices() -> None:
     merged = as_options(["项目汇报"], "您希望这个PPT的主题是什么？")
     assert len(merged) >= 2 and "项目汇报" in merged
     # 模型已经给了两个：原样保留
-    assert as_options(["A", "B"], "随便") == ["A", "B"]
+    assert as_options(["A", "B"], "随便")[:2] == ["A", "B"]
+    # 模型把整句要求塞进选项时压成一项
+    only_custom = as_options(["其他主题（请补充说明主题、受众和大致页数）"], "主题是什么？")
+    assert only_custom[-1] == "其他（我来描述）"
+    assert "其他主题（请补充说明主题、受众和大致页数）" not in only_custom
+    # 模型只给了“其他”这一项时，按问题补几个真实候选，别只剩一个空选项
+    assert len(only_custom) >= 3
 
 def test_question_sentence_finds_inline_question() -> None:
     """反问在句中（后面还接了半句说明）时也要能抓到，前端才有候选可点。"""
@@ -908,3 +917,25 @@ def test_question_sentence_finds_inline_question() -> None:
     assert _question_sentence("您希望主题是什么？") == "您希望主题是什么？"
     # 没有问号就没有反问
     assert _question_sentence("这是最终答案。[c1]") == ""
+
+def test_build_questions_splits_multi_ask() -> None:
+    """一次问三件事要拆成三行，每行各自带候选。"""
+    from knowledge_hub.engine.ask_options import build_questions, split_questions
+
+    text = (
+        "好的，请补充这份 PPT 的具体信息：1）主题是什么（例如：新产品介绍）；"
+        "2）受众是谁（例如：客户、管理层）；3）大致需要多少页？"
+    )
+    assert split_questions(text) == ["主题是什么", "受众是谁", "大致需要多少页"]
+
+    questions = build_questions(text)
+    assert [item["question"] for item in questions] == ["主题是什么", "受众是谁", "大致需要多少页"]
+    assert "产品介绍" in questions[0]["options"]
+    assert "管理层" in questions[1]["options"]
+    assert "10 页以内" in questions[2]["options"]
+    assert all(item["options"][-1] == "其他（我来描述）" for item in questions)
+
+    # 单个问题不拆，前端继续走单问题 UI
+    assert split_questions("你要查哪个城市？") == []
+    # 一个问句里带两个选项不算两个问题
+    assert split_questions("请问需要哪个产品的外观图？A200 还是 A400？") == []

@@ -139,6 +139,18 @@ export function toChatStreamEvent(raw: RawSseEvent): ChatStreamEvent | null {
       const options = Array.isArray(record?.options)
         ? (record.options as unknown[]).map((item) => String(item)).filter(Boolean)
         : [];
+      // 一次问多件事时的子问题（每项自带候选），同样不能在这里丢掉
+      const questions = Array.isArray(record?.questions)
+        ? (record.questions as unknown[])
+            .map((item) => {
+              const entry = asRecord(item);
+              const subOptions = Array.isArray(entry?.options)
+                ? (entry.options as unknown[]).map((opt) => String(opt)).filter(Boolean)
+                : [];
+              return { question: asString(entry?.question) ?? '', options: subOptions };
+            })
+            .filter((item) => item.question.length > 0)
+        : [];
       return {
         event: 'status',
         data: {
@@ -148,6 +160,7 @@ export function toChatStreamEvent(raw: RawSseEvent): ChatStreamEvent | null {
           // 之前只保留了 stage/detail，选项在这里就被丢掉了。
           question: asString(record?.question),
           options,
+          questions,
         },
       };
     }

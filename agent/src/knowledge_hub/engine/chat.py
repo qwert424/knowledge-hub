@@ -17,7 +17,7 @@ from typing import Any
 
 from knowledge_hub.config.settings import Settings
 from knowledge_hub.decision.jev import Jev, JevOption, JevResult
-from knowledge_hub.engine.ask_options import as_options
+from knowledge_hub.engine.ask_options import as_options, build_questions
 from knowledge_hub.engine.history import compress_history
 from knowledge_hub.engine.prompts import (
     build_direct_messages,
@@ -649,7 +649,16 @@ class ChatEngine:
             options = []
         logger.debug("maybe_ask body=%r options=%s", body[:60], options)
         # 候选不足两个时给确定性兜底：反问一定要有可点的按钮，不能退化成“请自己在下面补充”
-        return {"stage": "awaiting_user", "question": body, "options": as_options(options, body)}
+        payload: dict[str, Any] = {
+            "stage": "awaiting_user",
+            "question": body,
+            "options": as_options(options, body),
+        }
+        # 一次问好几件事（主题/受众/页数）：拆成多行子问题，各自带候选
+        questions = build_questions(body)
+        if questions:
+            payload["questions"] = questions
+        return payload
 
     async def _delegate_to_agent(
         self,
