@@ -118,6 +118,8 @@ def _as_float(value: Any, default: float) -> float:
 
 
 _DEFAULT_LANE_WEIGHTS = {"dense": 0.6, "sparse": 0.4, "graph": 0.3}
+#: 向量库抖动时的重试退避（只重试一次，避免把问答拖长）
+_MILVUS_RETRY_DELAY_S = 0.5
 
 
 def fuse_rrf(
@@ -294,8 +296,9 @@ class Retriever:
             return RetrieveResult(chunks=[], debug=debug)
 
         timeout = timeout_ms or _as_int(_profile_value(profile, "timeout_ms", 8000), 8000)
-        try:
-            result = await asyncio.wait_for(
+
+        async def _attempt() -> RetrieveResult:
+            return await asyncio.wait_for(
                 self._retrieve_inner(
                     ticket=ticket,
                     kb_ids=effective_kb,
@@ -309,9 +312,19 @@ class Retriever:
                 ),
                 timeout=timeout / 1000.0,
             )
+
+        try:
+            result = await _attempt()
         except MilvusUnavailable:
-            self._note_store_failure()
-            raise
+            # 向量库偶发抖动（容器刚重启/连接被重置）不该让整轮问答降级成标量兜底：
+            # 一次短退避重连后重试，仍失败才把异常抛给上层。
+            logger.warning("milvus unavailable, retrying once after %.1fs", _MILVUS_RETRY_DELAY_S)
+            await asyncio.sleep(_MILVUS_RETRY_DELAY_S)
+            try:
+                result = await _attempt()
+            except MilvusUnavailable:
+                self._note_store_failure()
+                raise
         except TimeoutError as exc:
             # 检索超时几乎总是向量库卡住：同样触发熔断，避免下一次请求再等满预算
             self._note_store_failure()

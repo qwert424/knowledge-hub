@@ -363,3 +363,27 @@ async def test_text_chunk_has_no_image_url(settings: Settings) -> None:
         kb_collections={"kb_001": "kh_demo_8"},
     )
     assert result.chunks[0].image_url == ""
+
+@pytest.mark.asyncio
+async def test_retrieval_retries_once_when_milvus_blips(settings) -> None:
+    """向量库抖一下不该让整轮问答降级成标量兜底：重试一次就恢复。"""
+    from knowledge_hub.errors import MilvusUnavailable
+    from knowledge_hub.rag.retriever import Retriever, RetrieveResult
+
+    calls = {"n": 0}
+
+    class FlakyRetriever(Retriever):
+        async def _retrieve_inner(self, **kwargs):  # noqa: ANN003, ANN202
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise MilvusUnavailable("blip")
+            return RetrieveResult(chunks=[], debug={})
+
+    retriever = FlakyRetriever(settings)
+    result = await retriever.retrieve(
+        ticket=_ticket(),
+        kb_ids=["kb_001"],
+        query="住宿标准",
+    )
+    assert calls["n"] == 2
+    assert result.chunks == []
